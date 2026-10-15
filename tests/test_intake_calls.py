@@ -1,7 +1,7 @@
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
-from app.db.mongodb import get_intake_calls_collection
+from app.db.mongodb import get_intake_audit_events_collection, get_intake_calls_collection
 from app.main import create_app
 from app.security.field_encryption import FieldEncryptor, get_field_encryptor
 
@@ -14,10 +14,20 @@ class FakeIntakeCallsCollection:
         self.documents.append(document)
 
 
+class FakeAuditEventsCollection:
+    def __init__(self) -> None:
+        self.documents: list[dict] = []
+
+    async def insert_one(self, document: dict) -> None:
+        self.documents.append(document)
+
+
 def test_create_intake_call_keeps_artifact_as_private_reference() -> None:
     app = create_app()
     collection = FakeIntakeCallsCollection()
+    audit_collection = FakeAuditEventsCollection()
     app.dependency_overrides[get_intake_calls_collection] = lambda: collection
+    app.dependency_overrides[get_intake_audit_events_collection] = lambda: audit_collection
     encryptor = FieldEncryptor(Fernet.generate_key().decode())
     app.dependency_overrides[get_field_encryptor] = lambda: encryptor
     payload = {
@@ -75,12 +85,22 @@ def test_create_intake_call_keeps_artifact_as_private_reference() -> None:
     assert "I need help with a separation." not in str(document)
     assert encryptor.decrypt(document["intake"]["facts"][0]["value_encrypted"]) == "1 October 2026"
     assert response.json()["lawyer_review"]["status"] == "pending"
+    assert [event["event_type"] for event in audit_collection.documents] == [
+        "intake_created",
+        "consent_recorded",
+        "artifact_attached",
+    ]
+    assert "+919999999999" not in str(audit_collection.documents)
+    assert "Asha Sharma" not in str(audit_collection.documents)
+    assert "recording.wav" not in str(audit_collection.documents)
 
 
 def test_create_intake_call_rejects_non_private_storage_reference() -> None:
     app = create_app()
     collection = FakeIntakeCallsCollection()
+    audit_collection = FakeAuditEventsCollection()
     app.dependency_overrides[get_intake_calls_collection] = lambda: collection
+    app.dependency_overrides[get_intake_audit_events_collection] = lambda: audit_collection
     app.dependency_overrides[get_field_encryptor] = lambda: FieldEncryptor(
         Fernet.generate_key().decode()
     )

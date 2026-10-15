@@ -28,3 +28,7 @@ def get_call_events_collection(request: Request) -> AsyncCollection:
 
 def get_intake_calls_collection(request: Request) -> AsyncCollection:
     return request.app.state.mongodb.database["intake_calls"]
+
+
+def get_intake_audit_events_collection(request: Request) -> AsyncCollection:
+    return request.app.state.mongodb.database["intake_audit_events"]
