@@ -1,5 +1,7 @@
 import logging
 from datetime import UTC, datetime
+from hashlib import sha256
+from json import dumps
 from secrets import compare_digest
 from urllib.parse import parse_qsl
 
@@ -57,17 +59,40 @@ def _recording_available(params: dict[str, str]) -> bool | None:
     return recording_url.lower() not in {"", "null", "none"}
 
 
-async def _record_event(collection, call_sid: str, event_type: str, **fields) -> None:
-    await collection.insert_one(
+def _event_key(call_sid: str, event_type: str, fields: dict[str, object]) -> str:
+    payload = {
+        "provider": "exotel",
+        "provider_call_id": call_sid,
+        "event_type": event_type,
+        "fields": fields,
+    }
+    return sha256(dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+async def _record_event(collection, call_sid: str, event_type: str, **fields) -> bool:
+    event_key = _event_key(call_sid, event_type, fields)
+    result = await collection.update_one(
+        {"event_key": event_key},
         {
-            "provider": "exotel",
-            "provider_call_id": call_sid,
-            "event_type": event_type,
-            "received_at": datetime.now(UTC),
-            **fields,
-        }
+            "$setOnInsert": {
+                "event_key": event_key,
+                "provider": "exotel",
+                "provider_call_id": call_sid,
+                "event_type": event_type,
+                "received_at": datetime.now(UTC),
+                **fields,
+            }
+        },
+        upsert=True,
     )
-    logger.info("exotel_%s_received call_sid=%s", event_type, call_sid)
+    inserted = result.upserted_id is not None
+    logger.info(
+        "exotel_%s_%s call_sid=%s",
+        event_type,
+        "received" if inserted else "duplicate",
+        call_sid,
+    )
+    return inserted
 
 
 @router.get("/exotel/passthru", status_code=status.HTTP_200_OK)
@@ -81,8 +106,12 @@ async def exotel_passthru(
     params = dict(request.query_params)
     call_sid = _require_call_sid(params)
     direction = _param(params, "Direction", "direction") or "unknown"
-    await _record_event(collection, call_sid, "passthru", direction=direction)
-    return {"status": "received", "provider": "exotel", "call_sid": call_sid}
+    inserted = await _record_event(collection, call_sid, "passthru", direction=direction)
+    return {
+        "status": "received" if inserted else "duplicate",
+        "provider": "exotel",
+        "call_sid": call_sid,
+    }
 
 
 @router.api_route("/exotel/status", methods=["GET", "POST"], status_code=status.HTTP_200_OK)
@@ -101,5 +130,9 @@ async def exotel_status(
     recording_available = _recording_available(params)
     if recording_available is not None:
         fields["recording_available"] = recording_available
-    await _record_event(collection, call_sid, "status", **fields)
-    return {"status": "received", "provider": "exotel", "call_sid": call_sid}
+    inserted = await _record_event(collection, call_sid, "status", **fields)
+    return {
+        "status": "received" if inserted else "duplicate",
+        "provider": "exotel",
+        "call_sid": call_sid,
+    }

@@ -11,8 +11,17 @@ class FakeCollection:
     def __init__(self) -> None:
         self.documents: list[dict] = []
 
-    async def insert_one(self, document: dict) -> None:
-        self.documents.append(document)
+    async def update_one(self, filter: dict, update: dict, *, upsert: bool) -> "FakeUpdateResult":
+        assert upsert is True
+        if any(document["event_key"] == filter["event_key"] for document in self.documents):
+            return FakeUpdateResult(upserted_id=None)
+        self.documents.append(update["$setOnInsert"])
+        return FakeUpdateResult(upserted_id="inserted")
+
+
+class FakeUpdateResult:
+    def __init__(self, upserted_id: str | None) -> None:
+        self.upserted_id = upserted_id
 
 
 def make_client() -> tuple[TestClient, FakeCollection]:
@@ -58,6 +67,21 @@ def test_exotel_passthru_accepts_exotel_parameter_casing() -> None:
     assert response.status_code == 200
     assert events.documents[0]["provider_call_id"] == "exotel-call-001"
     assert events.documents[0]["direction"] == "incoming"
+
+
+def test_exotel_passthru_ignores_duplicate_callbacks() -> None:
+    client, events = make_client()
+    url = (
+        "/api/v1/telephony/exotel/passthru?CallSid=exotel-call-duplicate&Direction=incoming"
+        f"&token={WEBHOOK_TOKEN}"
+    )
+    with client:
+        first = client.get(url)
+        second = client.get(url)
+
+    assert first.json()["status"] == "received"
+    assert second.json()["status"] == "duplicate"
+    assert len(events.documents) == 1
 
 
 def test_exotel_passthru_requires_call_sid() -> None:
