@@ -67,7 +67,13 @@ class TextToSpeechProvider(Protocol):
 
 
 class StreamingTextToSpeechProvider(Protocol):
-    async def stream(self, text: str) -> AsyncIterator[SpeechAudio]: ...
+    async def stream(
+        self,
+        text: str,
+        *,
+        language_code: str | None = None,
+        speaker: str | None = None,
+    ) -> AsyncIterator[SpeechAudio]: ...
 
 
 class ObjectStorageProvider(Protocol):

@@ -133,13 +133,24 @@ class SarvamStreamingTextToSpeech:
             "send_completion_event": "true",
         }
 
-    async def stream(self, text: str) -> AsyncIterator[SpeechAudio]:
+    async def stream(
+        self,
+        text: str,
+        *,
+        language_code: str | None = None,
+        speaker: str | None = None,
+    ) -> AsyncIterator[SpeechAudio]:
         connection = await self._websocket_connect(
             self._url,
             additional_headers={"api-subscription-key": self._api_key},
         )
         try:
-            await connection.send(json.dumps({"type": "config", "data": self._config}))
+            config = {
+                **self._config,
+                **({"language_code": language_code} if language_code else {}),
+                **({"speaker": speaker} if speaker else {}),
+            }
+            await connection.send(json.dumps({"type": "config", "data": config}))
             await connection.send(json.dumps({"type": "text", "data": {"text": text}}))
             await connection.send(json.dumps({"type": "flush"}))
             async for raw_event in connection:

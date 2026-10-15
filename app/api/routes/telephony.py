@@ -26,19 +26,32 @@ from app.providers.contracts import (
     TranscriptHandler,
 )
 from app.providers.sarvam import SarvamRealtimeSpeechToTextSession, SarvamStreamingTextToSpeech
+from app.schemas.intake_call import LanguageChoice
 from app.workflows.consent import (
-    ENGLISH_CONSENT_DECLINED_RESPONSE,
-    ENGLISH_CONSENT_GRANTED_RESPONSE,
-    ENGLISH_CONSENT_PROMPT,
-    ENGLISH_CONSENT_REPROMPT,
-    ENGLISH_CONSENT_UNCLEAR_CLOSURE,
     ConsentAction,
+    ConsentDialogue,
     ConsentState,
     ConsentWorkflow,
+    get_consent_dialogue,
+)
+from app.workflows.language import (
+    LanguageSelectionAction,
+    LanguageSelectionState,
+    LanguageSelectionWorkflow,
 )
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+LANGUAGE_SELECTION_PROMPT = (
+    "Hello. I am an AI assistant for the law firm. Please say English or Hindi to choose your "
+    "language."
+)
+LANGUAGE_SELECTION_REPROMPT = "Please say English or Hindi."
+LANGUAGE_SELECTION_UNCLEAR_CLOSURE = (
+    "I was unable to confirm your language choice, so I will not collect case information. "
+    "Thank you for calling. Goodbye."
+)
 
 # Exotel status fields we keep. Caller/callee numbers (From/To) are deliberately excluded.
 STATUS_FIELDS = {
@@ -151,6 +164,13 @@ def _create_tts_provider(settings: Settings) -> StreamingTextToSpeechProvider:
     return SarvamStreamingTextToSpeech(settings)
 
 
+def _speaker_for_language(settings: Settings, language: LanguageChoice) -> str:
+    return {
+        LanguageChoice.ENGLISH: settings.sarvam_tts_speaker,
+        LanguageChoice.HINDI: settings.sarvam_tts_hindi_speaker,
+    }[language]
+
+
 def _event_key(call_sid: str, event_type: str, fields: dict[str, object]) -> str:
     payload = {
         "provider": "exotel",
@@ -188,14 +208,14 @@ async def _record_event(collection, call_sid: str, event_type: str, **fields) ->
 
 
 async def _record_voicebot_session_event(
-    collection, stream_sid: str | None, event_type: str
+    collection, stream_sid: str | None, event_type: str, **fields: object
 ) -> None:
     """Record Voicebot lifecycle metadata without retaining media or transcript content."""
     if not stream_sid:
         logger.warning("exotel_voicebot_%s_missing_stream_sid", event_type)
         return
     try:
-        await _record_event(collection, stream_sid, event_type, stream_sid=stream_sid)
+        await _record_event(collection, stream_sid, event_type, stream_sid=stream_sid, **fields)
     except Exception:
         logger.exception(
             "exotel_voicebot_%s_event_record_failed stream_sid=%s", event_type, stream_sid
@@ -246,13 +266,22 @@ async def exotel_voicebot_stream(
     await websocket.accept()
     stream_sid: str | None = None
     stt_session: StreamingSpeechToTextSession | None = None
+    language_workflow = LanguageSelectionWorkflow()
     consent_workflow = ConsentWorkflow()
     speech_lock = Lock()
+    selected_dialogue: ConsentDialogue | None = None
 
-    async def speak(text: str) -> None:
+    async def speak(
+        text: str,
+        *,
+        language_code: str | None = None,
+        speaker: str | None = None,
+    ) -> None:
         async with speech_lock:
             tts_provider = _create_tts_provider(settings)
-            async for audio in tts_provider.stream(text):
+            async for audio in tts_provider.stream(
+                text, language_code=language_code, speaker=speaker
+            ):
                 await websocket.send_json(
                     {
                         "event": "media",
@@ -262,6 +291,7 @@ async def exotel_voicebot_stream(
                 )
 
     async def on_transcript(event_type: str, transcript: str, language: str | None) -> None:
+        nonlocal selected_dialogue
         logger.info(
             "sarvam_stt_transcript_received stream_sid=%s event=%s language=%s characters=%d",
             stream_sid,
@@ -270,6 +300,36 @@ async def exotel_voicebot_stream(
             len(transcript),
         )
         if event_type != "transcript.final":
+            return
+        if language_workflow.state == LanguageSelectionState.AWAITING_SELECTION:
+            action = language_workflow.handle_response(transcript)
+            if action == LanguageSelectionAction.REPROMPT_LANGUAGE:
+                await _record_voicebot_session_event(
+                    collection, stream_sid, "voicebot_reprompt_language"
+                )
+                await speak(LANGUAGE_SELECTION_REPROMPT)
+                return
+            if action == LanguageSelectionAction.CLOSE_CALL:
+                await _record_voicebot_session_event(collection, stream_sid, "voicebot_close_call")
+                await speak(LANGUAGE_SELECTION_UNCLEAR_CLOSURE)
+                return
+
+            selected_language = language_workflow.selected_language
+            if selected_language is None:
+                raise RuntimeError("Language selection completed without a selected language")
+            selected_dialogue = get_consent_dialogue(selected_language)
+            await _record_voicebot_session_event(
+                collection,
+                stream_sid,
+                "voicebot_language_selected",
+                language=selected_language,
+            )
+            consent_workflow.begin()
+            await speak(
+                selected_dialogue.prompt,
+                language_code=selected_dialogue.language_code,
+                speaker=_speaker_for_language(settings, selected_language),
+            )
             return
         if consent_workflow.state != ConsentState.AWAITING_CONSENT:
             logger.info(
@@ -280,15 +340,23 @@ async def exotel_voicebot_stream(
             return
 
         action = consent_workflow.handle_response(transcript)
+        if selected_dialogue is None:
+            raise RuntimeError("Consent response received without a selected language")
         response = {
-            ConsentAction.REPROMPT_CONSENT: ENGLISH_CONSENT_REPROMPT,
-            ConsentAction.CONSENT_GRANTED: ENGLISH_CONSENT_GRANTED_RESPONSE,
-            ConsentAction.CONSENT_DECLINED: ENGLISH_CONSENT_DECLINED_RESPONSE,
-            ConsentAction.CLOSE_CALL: ENGLISH_CONSENT_UNCLEAR_CLOSURE,
+            ConsentAction.REPROMPT_CONSENT: selected_dialogue.reprompt,
+            ConsentAction.CONSENT_GRANTED: selected_dialogue.granted_response,
+            ConsentAction.CONSENT_DECLINED: selected_dialogue.declined_response,
+            ConsentAction.CLOSE_CALL: selected_dialogue.unclear_closure,
         }[action]
         await _record_voicebot_session_event(collection, stream_sid, f"voicebot_{action}")
         try:
-            await speak(response)
+            await speak(
+                response,
+                language_code=selected_dialogue.language_code,
+                speaker=_speaker_for_language(
+                    settings, language_workflow.selected_language
+                ),
+            )
         except (OSError, ValueError):
             logger.exception(
                 "sarvam_tts_response_failed stream_sid=%s action=%s", stream_sid, action
@@ -300,9 +368,9 @@ async def exotel_voicebot_stream(
             return
 
     async def speak_consent_prompt() -> None:
-        if consent_workflow.begin() != ConsentAction.REQUEST_CONSENT:
+        if language_workflow.begin() != LanguageSelectionAction.REQUEST_LANGUAGE:
             return
-        await speak(ENGLISH_CONSENT_PROMPT)
+        await speak(LANGUAGE_SELECTION_PROMPT)
 
     try:
         while True:
@@ -328,7 +396,10 @@ async def exotel_voicebot_stream(
             elif (
                 event_type == "media"
                 and stt_session
-                and consent_workflow.state == ConsentState.AWAITING_CONSENT
+                and (
+                    language_workflow.state == LanguageSelectionState.AWAITING_SELECTION
+                    or consent_workflow.state == ConsentState.AWAITING_CONSENT
+                )
             ):
                 payload = message.get("media", {}).get("payload")
                 if isinstance(payload, str) and payload:
