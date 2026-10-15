@@ -53,6 +53,13 @@ _DECLINED_TERMS = {
     "ना",
 }
 
+ENGLISH_CONSENT_PROMPT = (
+    "Hello. I am an AI intake assistant for the law firm. I can collect initial information "
+    "for a lawyer to review, but I cannot give legal advice, and this call does not create a "
+    "lawyer-client relationship. If you consent, this conversation may be recorded and reviewed "
+    "by the firm. Do you consent to continue? Please say yes or no."
+)
+
 
 class ConsentWorkflow:
     """Accept only an explicit affirmative answer before allowing case-fact collection."""

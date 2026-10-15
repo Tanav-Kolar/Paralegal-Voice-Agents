@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     sarvam_stt_stream_type: str = "fast"
     sarvam_stt_sample_rate: int = 8000
     sarvam_stt_mode: str = "codemix"
+    sarvam_tts_model: str = "bulbul:v4-flash"
+    sarvam_tts_language_code: str = "en-IN"
+    sarvam_tts_speaker: str = "simran_en_customer"
+    sarvam_tts_sample_rate: int = 8000
     object_storage_provider: str = "unconfigured"
     gcs_project_id: str = ""
     gcs_bucket_name: str = ""
@@ -61,6 +65,13 @@ class Settings(BaseSettings):
     def validate_sarvam_stt_sample_rate(cls, value: int) -> int:
         if value not in {8000, 16000}:
             raise ValueError("SARVAM_STT_SAMPLE_RATE must be 8000 or 16000")
+        return value
+
+    @field_validator("sarvam_tts_sample_rate")
+    @classmethod
+    def validate_sarvam_tts_sample_rate(cls, value: int) -> int:
+        if value not in {8000, 16000, 22050, 24000}:
+            raise ValueError("SARVAM_TTS_SAMPLE_RATE must be a supported streaming sample rate")
         return value
 
 

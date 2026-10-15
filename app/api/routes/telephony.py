@@ -1,5 +1,5 @@
 import logging
-from base64 import b64decode
+from base64 import b64decode, b64encode
 from binascii import Error as BinasciiError
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -19,8 +19,13 @@ from fastapi import (
 
 from app.core.config import Settings, get_settings
 from app.db.mongodb import get_call_events_collection
-from app.providers.contracts import StreamingSpeechToTextSession, TranscriptHandler
-from app.providers.sarvam import SarvamRealtimeSpeechToTextSession
+from app.providers.contracts import (
+    StreamingSpeechToTextSession,
+    StreamingTextToSpeechProvider,
+    TranscriptHandler,
+)
+from app.providers.sarvam import SarvamRealtimeSpeechToTextSession, SarvamStreamingTextToSpeech
+from app.workflows.consent import ENGLISH_CONSENT_PROMPT, ConsentAction, ConsentWorkflow
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -130,6 +135,12 @@ def _create_stt_session(
     return SarvamRealtimeSpeechToTextSession(settings, on_transcript)
 
 
+def _create_tts_provider(settings: Settings) -> StreamingTextToSpeechProvider:
+    if settings.text_to_speech_provider != "sarvam":
+        raise ValueError("Sarvam must be configured as the text-to-speech provider")
+    return SarvamStreamingTextToSpeech(settings)
+
+
 def _event_key(call_sid: str, event_type: str, fields: dict[str, object]) -> str:
     payload = {
         "provider": "exotel",
@@ -225,6 +236,7 @@ async def exotel_voicebot_stream(
     await websocket.accept()
     stream_sid: str | None = None
     stt_session: StreamingSpeechToTextSession | None = None
+    consent_workflow = ConsentWorkflow()
 
     async def on_transcript(event_type: str, transcript: str, language: str | None) -> None:
         logger.info(
@@ -234,6 +246,19 @@ async def exotel_voicebot_stream(
             language or "unknown",
             len(transcript),
         )
+
+    async def speak_consent_prompt() -> None:
+        if consent_workflow.begin() != ConsentAction.REQUEST_CONSENT:
+            return
+        tts_provider = _create_tts_provider(settings)
+        async for audio in tts_provider.stream(ENGLISH_CONSENT_PROMPT):
+            await websocket.send_json(
+                {
+                    "event": "media",
+                    "stream_sid": stream_sid,
+                    "media": {"payload": b64encode(audio.content).decode()},
+                }
+            )
 
     try:
         while True:
@@ -248,6 +273,7 @@ async def exotel_voicebot_stream(
                 try:
                     stt_session = _create_stt_session(settings, on_transcript)
                     await stt_session.start()
+                    await speak_consent_prompt()
                 except (OSError, ValueError):
                     logger.exception("sarvam_stt_session_start_failed stream_sid=%s", stream_sid)
                     await _record_voicebot_session_event(

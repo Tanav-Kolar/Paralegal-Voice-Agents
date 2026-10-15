@@ -48,12 +48,29 @@ class FakeStreamingSpeechToTextSession:
         self.stopped = True
 
 
-def make_client() -> tuple[TestClient, FakeCollection, list[FakeStreamingSpeechToTextSession]]:
+class FakeStreamingTextToSpeechProvider:
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    async def stream(self, text: str):
+        from app.providers.contracts import SpeechAudio
+
+        self.texts.append(text)
+        yield SpeechAudio(content=b"prompt-audio", content_type="audio/L16")
+
+
+def make_client() -> tuple[
+    TestClient,
+    FakeCollection,
+    list[FakeStreamingSpeechToTextSession],
+    list[FakeStreamingTextToSpeechProvider],
+]:
     from app.api.routes import telephony
 
     app = create_app()
     events = FakeCollection()
     stt_sessions: list[FakeStreamingSpeechToTextSession] = []
+    tts_providers: list[FakeStreamingTextToSpeechProvider] = []
     settings = Settings(
         _env_file=None,
         exotel_webhook_token=WEBHOOK_TOKEN,
@@ -71,14 +88,21 @@ def make_client() -> tuple[TestClient, FakeCollection, list[FakeStreamingSpeechT
         stt_sessions.append(session)
         return session
 
+    def create_fake_tts_provider(settings: Settings) -> FakeStreamingTextToSpeechProvider:
+        assert settings.sarvam_api_key == "test-sarvam-api-key"
+        provider = FakeStreamingTextToSpeechProvider()
+        tts_providers.append(provider)
+        return provider
+
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_call_events_collection] = lambda: events
     telephony._create_stt_session = create_fake_stt_session
-    return TestClient(app), events, stt_sessions
+    telephony._create_tts_provider = create_fake_tts_provider
+    return TestClient(app), events, stt_sessions, tts_providers
 
 
 def test_exotel_passthru_records_event() -> None:
-    client, events, _ = make_client()
+    client, events, _, _ = make_client()
     with client:
         response = client.get(
             "/api/v1/telephony/exotel/passthru?callsid=demo-call-001&direction=inbound"
@@ -101,7 +125,7 @@ def test_exotel_passthru_records_event() -> None:
 
 
 def test_exotel_passthru_accepts_exotel_parameter_casing() -> None:
-    client, events, _ = make_client()
+    client, events, _, _ = make_client()
     with client:
         response = client.get(
             "/api/v1/telephony/exotel/passthru?CallSid=exotel-call-001&Direction=incoming"
@@ -114,7 +138,7 @@ def test_exotel_passthru_accepts_exotel_parameter_casing() -> None:
 
 
 def test_exotel_passthru_ignores_duplicate_callbacks() -> None:
-    client, events, _ = make_client()
+    client, events, _, _ = make_client()
     url = (
         "/api/v1/telephony/exotel/passthru?CallSid=exotel-call-duplicate&Direction=incoming"
         f"&token={WEBHOOK_TOKEN}"
@@ -129,7 +153,7 @@ def test_exotel_passthru_ignores_duplicate_callbacks() -> None:
 
 
 def test_exotel_passthru_requires_call_sid() -> None:
-    client, events, _ = make_client()
+    client, events, _, _ = make_client()
     with client:
         response = client.get(f"/api/v1/telephony/exotel/passthru?token={WEBHOOK_TOKEN}")
 
@@ -139,7 +163,7 @@ def test_exotel_passthru_requires_call_sid() -> None:
 
 
 def test_exotel_status_records_form_body_without_phone_numbers() -> None:
-    client, events, _ = make_client()
+    client, events, _, _ = make_client()
     with client:
         response = client.post(
             f"/api/v1/telephony/exotel/status?token={WEBHOOK_TOKEN}",
@@ -160,7 +184,7 @@ def test_exotel_status_records_form_body_without_phone_numbers() -> None:
 
 
 def test_exotel_status_accepts_query_string_and_requires_call_sid() -> None:
-    client, events, _ = make_client()
+    client, events, _, _ = make_client()
     with client:
         ok = client.get(
             f"/api/v1/telephony/exotel/status?CallSid=sid-2&Status=busy&RecordingUrl=null"
@@ -179,7 +203,7 @@ def test_exotel_status_accepts_query_string_and_requires_call_sid() -> None:
 
 
 def test_exotel_webhooks_reject_an_invalid_token() -> None:
-    client, events, _ = make_client()
+    client, events, _, _ = make_client()
     with client:
         response = client.get("/api/v1/telephony/exotel/passthru?CallSid=sid-3&token=invalid")
 
@@ -188,7 +212,7 @@ def test_exotel_webhooks_reject_an_invalid_token() -> None:
 
 
 def test_exotel_voicebot_resolver_returns_websocket_url() -> None:
-    client, _, _ = make_client()
+    client, _, _, _ = make_client()
     with client:
         response = client.get(
             f"/api/v1/telephony/exotel/voicebot?CallSid=sid-voicebot&token={WEBHOOK_TOKEN}"
@@ -202,7 +226,7 @@ def test_exotel_voicebot_resolver_returns_websocket_url() -> None:
 
 
 def test_exotel_voicebot_stream_requires_basic_authentication() -> None:
-    client, _, _ = make_client()
+    client, _, _, _ = make_client()
     with client, pytest.raises(WebSocketDisconnect) as error:
         with client.websocket_connect("/api/v1/telephony/exotel/voicebot/stream"):
             pass
@@ -228,8 +252,8 @@ def test_exotel_voicebot_stream_resolves_database_dependency_for_websocket() -> 
             pass
 
 
-def test_exotel_voicebot_stream_relays_media_to_sarvam_stt() -> None:
-    client, events, stt_sessions = make_client()
+def test_exotel_voicebot_stream_relays_media_to_sarvam_stt_and_plays_consent_prompt() -> None:
+    client, events, stt_sessions, tts_providers = make_client()
     credentials = b64encode(f"{VOICEBOT_USERNAME}:{VOICEBOT_PASSWORD}".encode()).decode()
     with client:
         with client.websocket_connect(
@@ -239,6 +263,7 @@ def test_exotel_voicebot_stream_relays_media_to_sarvam_stt() -> None:
             websocket.send_json(
                 {"event": "start", "start": {"stream_sid": "stream-test-001"}}
             )
+            prompt_audio = websocket.receive_json()
             websocket.send_json({"event": "media", "media": {"payload": "cGNtLWF1ZGlv"}})
             websocket.send_json({"event": "stop"})
 
@@ -246,6 +271,12 @@ def test_exotel_voicebot_stream_relays_media_to_sarvam_stt() -> None:
     assert stt_sessions[0].started is True
     assert stt_sessions[0].audio_payloads == ["cGNtLWF1ZGlv"]
     assert stt_sessions[0].stopped is True
+    assert tts_providers[0].texts
+    assert prompt_audio == {
+        "event": "media",
+        "stream_sid": "stream-test-001",
+        "media": {"payload": "cHJvbXB0LWF1ZGlv"},
+    }
     assert [event["event_type"] for event in events.documents] == [
         "voicebot_stream_started",
         "voicebot_stream_stopped",

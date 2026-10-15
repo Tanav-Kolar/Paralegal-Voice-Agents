@@ -3,7 +3,9 @@
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable
+from base64 import b64decode
+from binascii import Error as BinasciiError
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 from urllib.parse import urlencode
 
@@ -11,11 +13,12 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
 from app.core.config import Settings
-from app.providers.contracts import TranscriptHandler
+from app.providers.contracts import SpeechAudio, TranscriptHandler
 
 logger = logging.getLogger(__name__)
 
 SARVAM_REALTIME_STT_URL = "wss://api.sarvam.ai/speech-to-text-realtime/ws"
+SARVAM_STREAMING_TTS_URL = "wss://api.sarvam.ai/text-to-speech/ws"
 
 
 class SarvamRealtimeSpeechToTextSession:
@@ -100,3 +103,63 @@ class SarvamRealtimeSpeechToTextSession:
         language = event.get("language")
         detected_language = language if isinstance(language, str) else None
         await self._on_transcript(event_type, transcript, detected_language)
+
+
+class SarvamStreamingTextToSpeech:
+    """Synthesize 8 kHz Linear16 speech suitable for the Exotel Voicebot stream."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        websocket_connect: Callable[..., Awaitable[ClientConnection]] = connect,
+    ) -> None:
+        if not settings.sarvam_api_key:
+            raise ValueError("Sarvam API key is not configured")
+        self._api_key = settings.sarvam_api_key
+        self._url = f"{SARVAM_STREAMING_TTS_URL}?{urlencode(self._connection_params(settings))}"
+        self._websocket_connect = websocket_connect
+        self._config = {
+            "speaker": settings.sarvam_tts_speaker,
+            "language_code": settings.sarvam_tts_language_code,
+            "speech_sample_rate": settings.sarvam_tts_sample_rate,
+            "output_audio_codec": "linear16",
+            "pace": 1.0,
+        }
+
+    @staticmethod
+    def _connection_params(settings: Settings) -> dict[str, str]:
+        return {
+            "model": settings.sarvam_tts_model,
+            "send_completion_event": "true",
+        }
+
+    async def stream(self, text: str) -> AsyncIterator[SpeechAudio]:
+        connection = await self._websocket_connect(
+            self._url,
+            additional_headers={"api-subscription-key": self._api_key},
+        )
+        try:
+            await connection.send(json.dumps({"type": "config", "data": self._config}))
+            await connection.send(json.dumps({"type": "text", "data": {"text": text}}))
+            await connection.send(json.dumps({"type": "flush"}))
+            async for raw_event in connection:
+                event = json.loads(raw_event)
+                if event.get("type") == "audio":
+                    audio = event.get("data", {}).get("audio")
+                    if not isinstance(audio, str):
+                        raise ValueError("Sarvam TTS response did not include audio")
+                    try:
+                        content = b64decode(audio, validate=True)
+                    except BinasciiError as error:
+                        raise ValueError("Sarvam TTS response included invalid audio") from error
+                    content_type = event.get("data", {}).get("content_type", "audio/L16")
+                    yield SpeechAudio(content=content, content_type=content_type)
+                elif (
+                    event.get("type") == "event"
+                    and event.get("data", {}).get("event_type") == "final"
+                ):
+                    return
+                elif event.get("type") == "error":
+                    raise ValueError("Sarvam TTS synthesis failed")
+        finally:
+            await connection.close()

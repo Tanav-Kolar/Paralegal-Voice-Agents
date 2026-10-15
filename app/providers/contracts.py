@@ -1,6 +1,6 @@
 """Interfaces that isolate workflow logic from external service vendors."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
@@ -64,6 +64,10 @@ class StreamingSpeechToTextSession(Protocol):
 
 class TextToSpeechProvider(Protocol):
     async def synthesize(self, text: str, language: str) -> SpeechAudio: ...
+
+
+class StreamingTextToSpeechProvider(Protocol):
+    async def stream(self, text: str) -> AsyncIterator[SpeechAudio]: ...
 
 
 class ObjectStorageProvider(Protocol):
