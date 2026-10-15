@@ -166,6 +166,21 @@ async def _record_event(collection, call_sid: str, event_type: str, **fields) ->
     return inserted
 
 
+async def _record_voicebot_session_event(
+    collection, stream_sid: str | None, event_type: str
+) -> None:
+    """Record Voicebot lifecycle metadata without retaining media or transcript content."""
+    if not stream_sid:
+        logger.warning("exotel_voicebot_%s_missing_stream_sid", event_type)
+        return
+    try:
+        await _record_event(collection, stream_sid, event_type, stream_sid=stream_sid)
+    except Exception:
+        logger.exception(
+            "exotel_voicebot_%s_event_record_failed stream_sid=%s", event_type, stream_sid
+        )
+
+
 @router.get("/exotel/passthru", status_code=status.HTTP_200_OK)
 async def exotel_passthru(
     request: Request,
@@ -200,6 +215,7 @@ async def exotel_voicebot_resolver(
 async def exotel_voicebot_stream(
     websocket: WebSocket,
     settings: Settings = Depends(get_settings),
+    collection=Depends(get_call_events_collection),
 ) -> None:
     """Accept Exotel Voicebot messages without retaining or logging media payloads."""
     if not _is_valid_voicebot_auth(websocket, settings):
@@ -226,11 +242,17 @@ async def exotel_voicebot_stream(
             if event_type == "start":
                 stream_sid = message.get("start", {}).get("stream_sid")
                 logger.info("exotel_voicebot_stream_started stream_sid=%s", stream_sid)
+                await _record_voicebot_session_event(
+                    collection, stream_sid, "voicebot_stream_started"
+                )
                 try:
                     stt_session = _create_stt_session(settings, on_transcript)
                     await stt_session.start()
                 except (OSError, ValueError):
                     logger.exception("sarvam_stt_session_start_failed stream_sid=%s", stream_sid)
+                    await _record_voicebot_session_event(
+                        collection, stream_sid, "voicebot_stt_start_failed"
+                    )
                     await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
                     return
             elif event_type == "media" and stt_session:
@@ -239,12 +261,16 @@ async def exotel_voicebot_stream(
                     await stt_session.send_audio(payload)
             elif event_type == "stop":
                 logger.info("exotel_voicebot_stream_stopped stream_sid=%s", stream_sid)
+                await _record_voicebot_session_event(
+                    collection, stream_sid, "voicebot_stream_stopped"
+                )
                 if stt_session:
                     await stt_session.stop()
                 await websocket.close()
                 return
     except WebSocketDisconnect:
         logger.info("exotel_voicebot_stream_disconnected stream_sid=%s", stream_sid)
+        await _record_voicebot_session_event(collection, stream_sid, "voicebot_stream_disconnected")
     finally:
         if stt_session:
             await stt_session.stop()

@@ -211,7 +211,7 @@ def test_exotel_voicebot_stream_requires_basic_authentication() -> None:
 
 
 def test_exotel_voicebot_stream_relays_media_to_sarvam_stt() -> None:
-    client, _, stt_sessions = make_client()
+    client, events, stt_sessions = make_client()
     credentials = b64encode(f"{VOICEBOT_USERNAME}:{VOICEBOT_PASSWORD}".encode()).decode()
     with client:
         with client.websocket_connect(
@@ -228,3 +228,8 @@ def test_exotel_voicebot_stream_relays_media_to_sarvam_stt() -> None:
     assert stt_sessions[0].started is True
     assert stt_sessions[0].audio_payloads == ["cGNtLWF1ZGlv"]
     assert stt_sessions[0].stopped is True
+    assert [event["event_type"] for event in events.documents] == [
+        "voicebot_stream_started",
+        "voicebot_stream_stopped",
+    ]
+    assert "cGNtLWF1ZGlv" not in str(events.documents)
