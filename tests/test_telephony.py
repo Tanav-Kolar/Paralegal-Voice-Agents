@@ -61,3 +61,35 @@ def test_exotel_passthru_requires_call_sid() -> None:
     assert response.status_code == 422
     assert response.json() == {"detail": "callsid required"}
     assert events.documents == []
+
+
+def test_exotel_status_records_form_body_without_phone_numbers() -> None:
+    client, events = make_client()
+    with client:
+        response = client.post(
+            "/api/v1/telephony/exotel/status",
+            content="CallSid=sid-1&Status=completed&Duration=42&From=%2B910000000000"
+            "&RecordingUrl=https%3A%2F%2Fexample.com%2Fr.mp3",
+            headers={"content-type": "application/x-www-form-urlencoded"},
+        )
+
+    assert response.status_code == 200
+    event = events.documents[0]
+    assert event["event_type"] == "status"
+    assert event["provider_call_id"] == "sid-1"
+    assert event["call_status"] == "completed"
+    assert event["duration_seconds"] == "42"
+    assert event["recording_url"] == "https://example.com/r.mp3"
+    assert "+910000000000" not in str(event)
+
+
+def test_exotel_status_accepts_query_string_and_requires_call_sid() -> None:
+    client, events = make_client()
+    with client:
+        ok = client.get("/api/v1/telephony/exotel/status?CallSid=sid-2&Status=busy")
+        missing = client.post("/api/v1/telephony/exotel/status", content="Status=busy")
+
+    assert ok.status_code == 200
+    assert events.documents[0]["call_status"] == "busy"
+    assert missing.status_code == 422
+    assert len(events.documents) == 1
