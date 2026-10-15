@@ -22,5 +22,9 @@ async def get_mongodb(request: Request) -> AsyncIterator[MongoDB]:
     yield request.app.state.mongodb
 
 
+def get_call_events_collection(request: Request) -> AsyncCollection:
+    return request.app.state.mongodb.database["call_events"]
+
+
 def get_intake_calls_collection(request: Request) -> AsyncCollection:
     return request.app.state.mongodb.database["intake_calls"]
