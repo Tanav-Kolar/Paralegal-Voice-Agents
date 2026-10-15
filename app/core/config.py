@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     after_hours_agent_enabled: bool = True
     callback_target_business_hours: int = Field(default=1, ge=1, le=120)
     telephony_provider: str = "unconfigured"
+    exotel_account_sid: str = ""
+    exotel_api_key: str = ""
+    exotel_api_token: str = ""
+    exotel_api_base_url: str = "https://api.in.exotel.com"
     speech_to_text_provider: str = "sarvam"
     text_to_speech_provider: str = "sarvam"
     sarvam_api_key: str = ""

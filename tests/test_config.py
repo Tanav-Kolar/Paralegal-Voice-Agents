@@ -13,6 +13,10 @@ def test_provider_settings_use_expected_defaults() -> None:
     settings = Settings(_env_file=None)
 
     assert settings.telephony_provider == "unconfigured"
+    assert settings.exotel_account_sid == ""
+    assert settings.exotel_api_key == ""
+    assert settings.exotel_api_token == ""
+    assert settings.exotel_api_base_url == "https://api.in.exotel.com"
     assert settings.speech_to_text_provider == "sarvam"
     assert settings.text_to_speech_provider == "sarvam"
     assert settings.object_storage_provider == "unconfigured"

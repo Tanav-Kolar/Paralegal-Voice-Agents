@@ -1,7 +1,8 @@
 from fastapi import APIRouter
 
-from app.api.routes import health, intake_calls
+from app.api.routes import health, intake_calls, telephony
 
 api_router = APIRouter()
 api_router.include_router(health.router, tags=["health"])
 api_router.include_router(intake_calls.router, prefix="/intake-calls", tags=["intake-calls"])
+api_router.include_router(telephony.router, prefix="/telephony", tags=["telephony"])
