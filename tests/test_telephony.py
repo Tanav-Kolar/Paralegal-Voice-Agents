@@ -86,15 +86,17 @@ def test_exotel_status_records_form_body_without_phone_numbers() -> None:
     assert event["provider_call_id"] == "sid-1"
     assert event["call_status"] == "completed"
     assert event["duration_seconds"] == "42"
-    assert event["recording_url"] == "https://example.com/r.mp3"
+    assert event["recording_available"] is True
     assert "+910000000000" not in str(event)
+    assert "https://example.com/r.mp3" not in str(event)
 
 
 def test_exotel_status_accepts_query_string_and_requires_call_sid() -> None:
     client, events = make_client()
     with client:
         ok = client.get(
-            f"/api/v1/telephony/exotel/status?CallSid=sid-2&Status=busy&token={WEBHOOK_TOKEN}"
+            f"/api/v1/telephony/exotel/status?CallSid=sid-2&Status=busy&RecordingUrl=null"
+            f"&token={WEBHOOK_TOKEN}"
         )
         missing = client.post(
             f"/api/v1/telephony/exotel/status?token={WEBHOOK_TOKEN}",
@@ -103,6 +105,7 @@ def test_exotel_status_accepts_query_string_and_requires_call_sid() -> None:
 
     assert ok.status_code == 200
     assert events.documents[0]["call_status"] == "busy"
+    assert events.documents[0]["recording_available"] is False
     assert missing.status_code == 422
     assert len(events.documents) == 1
 

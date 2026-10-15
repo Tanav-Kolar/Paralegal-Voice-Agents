@@ -18,7 +18,6 @@ STATUS_FIELDS = {
     "ConversationDuration": "conversation_duration_seconds",
     "StartTime": "provider_start_time",
     "EndTime": "provider_end_time",
-    "RecordingUrl": "recording_url",
 }
 
 
@@ -49,6 +48,13 @@ def _require_webhook_token(request: Request, settings: Settings) -> None:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Unauthorized Exotel webhook",
         )
+
+
+def _recording_available(params: dict[str, str]) -> bool | None:
+    recording_url = params.get("RecordingUrl")
+    if recording_url is None:
+        return None
+    return recording_url.lower() not in {"", "null", "none"}
 
 
 async def _record_event(collection, call_sid: str, event_type: str, **fields) -> None:
@@ -92,5 +98,8 @@ async def exotel_status(
     params = {**dict(request.query_params), **dict(parse_qsl(body))}
     call_sid = _require_call_sid(params)
     fields = {name: params[key] for key, name in STATUS_FIELDS.items() if params.get(key)}
+    recording_available = _recording_available(params)
+    if recording_available is not None:
+        fields["recording_available"] = recording_available
     await _record_event(collection, call_sid, "status", **fields)
     return {"status": "received", "provider": "exotel", "call_sid": call_sid}
