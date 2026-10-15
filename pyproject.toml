@@ -9,6 +9,7 @@ description = "AI-assisted family-law lead intake service for Indian law firms."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "cryptography>=43,<51",
   "fastapi>=0.115,<1.0",
   "google-cloud-storage>=2.18,<4.0",
   "pydantic-settings>=2.6,<3.0",

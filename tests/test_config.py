@@ -24,3 +24,4 @@ def test_provider_settings_use_expected_defaults() -> None:
     assert settings.speech_to_text_provider == "sarvam"
     assert settings.text_to_speech_provider == "sarvam"
     assert settings.object_storage_provider == "unconfigured"
+    assert settings.field_encryption_key == ""

@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class CallStatus(StrEnum):
@@ -51,9 +51,15 @@ class ArtifactKind(StrEnum):
 class TelephonyDetails(BaseModel):
     provider: str = Field(min_length=1, max_length=80)
     provider_call_id: str = Field(min_length=1, max_length=255)
-    incoming_number: str = Field(min_length=1, max_length=32)
     caller_phone_encrypted: str = Field(min_length=1)
     caller_phone_masked: str = Field(min_length=1, max_length=32)
+    started_at: datetime
+
+
+class TelephonyDetailsInput(BaseModel):
+    provider: str = Field(min_length=1, max_length=80)
+    provider_call_id: str = Field(min_length=1, max_length=255)
+    caller_phone: str = Field(min_length=1, max_length=32)
     started_at: datetime
 
 
@@ -79,6 +85,12 @@ class Party(BaseModel):
     role: PartyRole
     name_encrypted: str | None = None
     name_masked: str | None = Field(default=None, max_length=160)
+    relationship_to_caller_encrypted: str | None = None
+
+
+class PartyInput(BaseModel):
+    role: PartyRole
+    name: str | None = Field(default=None, max_length=160)
     relationship_to_caller: str | None = Field(default=None, max_length=160)
 
 
@@ -91,10 +103,35 @@ class CaseFact(BaseModel):
     not_provided: bool = False
 
 
+class CaseFactInput(BaseModel):
+    field_name: str = Field(min_length=1, max_length=160)
+    value: str | None = None
+    source_transcript_segment_ids: list[UUID] = Field(default_factory=list)
+    provided_by_caller: bool = True
+    not_provided: bool = False
+
+    @model_validator(mode="after")
+    def validate_value_or_absence(self) -> "CaseFactInput":
+        if self.not_provided and self.value:
+            raise ValueError("A fact cannot contain a value and be marked not provided")
+        if not self.not_provided and not self.value:
+            raise ValueError("A fact value is required unless marked not provided")
+        return self
+
+
 class TranscriptSegment(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     speaker: TranscriptSpeaker
     text_encrypted: str = Field(min_length=1)
+    started_at_ms: int = Field(ge=0)
+    ended_at_ms: int = Field(ge=0)
+    detected_language: str | None = Field(default=None, max_length=32)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+class TranscriptSegmentInput(BaseModel):
+    speaker: TranscriptSpeaker
+    text: str = Field(min_length=1)
     started_at_ms: int = Field(ge=0)
     ended_at_ms: int = Field(ge=0)
     detected_language: str | None = Field(default=None, max_length=32)
@@ -131,11 +168,26 @@ class LawyerReview(BaseModel):
     internal_notes_encrypted: str | None = None
 
 
+class LawyerReviewInput(BaseModel):
+    status: ReviewStatus = ReviewStatus.PENDING
+    reviewed_at: datetime | None = None
+    internal_notes: str | None = None
+
+
 class IntakeDetails(BaseModel):
     matter_type: str | None = Field(default=None, max_length=80)
     parties: list[Party] = Field(default_factory=list)
     facts: list[CaseFact] = Field(default_factory=list)
     transcript_segments: list[TranscriptSegment] = Field(default_factory=list)
+    artifacts: list[ProtectedObjectReference] = Field(default_factory=list)
+    reports: list[GeneratedReport] = Field(default_factory=list)
+
+
+class IntakeDetailsInput(BaseModel):
+    matter_type: str | None = Field(default=None, max_length=80)
+    parties: list[PartyInput] = Field(default_factory=list)
+    facts: list[CaseFactInput] = Field(default_factory=list)
+    transcript_segments: list[TranscriptSegmentInput] = Field(default_factory=list)
     artifacts: list[ProtectedObjectReference] = Field(default_factory=list)
     reports: list[GeneratedReport] = Field(default_factory=list)
 
@@ -148,6 +200,18 @@ class IntakeCallCreate(BaseModel):
     language: LanguageDetails = Field(default_factory=LanguageDetails)
     intake: IntakeDetails = Field(default_factory=IntakeDetails)
     lawyer_review: LawyerReview = Field(default_factory=LawyerReview)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class IntakeCallCreateRequest(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    status: CallStatus = CallStatus.STARTED
+    telephony: TelephonyDetailsInput
+    disclosures: DisclosureDetails = Field(default_factory=DisclosureDetails)
+    language: LanguageDetails = Field(default_factory=LanguageDetails)
+    intake: IntakeDetailsInput = Field(default_factory=IntakeDetailsInput)
+    lawyer_review: LawyerReviewInput = Field(default_factory=LawyerReviewInput)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 

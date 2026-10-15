@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     gcs_bucket_name: str = ""
     gcs_service_account_key_path: str = ""
     gcs_signed_url_ttl_minutes: int = Field(default=10, ge=1, le=60)
+    field_encryption_key: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

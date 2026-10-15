@@ -1,7 +1,9 @@
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from app.db.mongodb import get_intake_calls_collection
 from app.main import create_app
+from app.security.field_encryption import FieldEncryptor, get_field_encryptor
 
 
 class FakeIntakeCallsCollection:
@@ -16,13 +18,13 @@ def test_create_intake_call_keeps_artifact_as_private_reference() -> None:
     app = create_app()
     collection = FakeIntakeCallsCollection()
     app.dependency_overrides[get_intake_calls_collection] = lambda: collection
+    encryptor = FieldEncryptor(Fernet.generate_key().decode())
+    app.dependency_overrides[get_field_encryptor] = lambda: encryptor
     payload = {
         "telephony": {
             "provider": "exotel",
             "provider_call_id": "call-001",
-            "incoming_number": "+919999999999",
-            "caller_phone_encrypted": "encrypted-caller-phone",
-            "caller_phone_masked": "+91******9999",
+            "caller_phone": "+919999999999",
             "started_at": "2026-10-15T10:00:00Z",
         },
         "disclosures": {
@@ -31,6 +33,22 @@ def test_create_intake_call_keeps_artifact_as_private_reference() -> None:
         },
         "intake": {
             "matter_type": "divorce_separation",
+            "parties": [
+                {
+                    "role": "caller",
+                    "name": "Asha Sharma",
+                    "relationship_to_caller": "spouse",
+                }
+            ],
+            "facts": [{"field_name": "separation_date", "value": "1 October 2026"}],
+            "transcript_segments": [
+                {
+                    "speaker": "caller",
+                    "text": "I need help with a separation.",
+                    "started_at_ms": 0,
+                    "ended_at_ms": 2000,
+                }
+            ],
             "artifacts": [
                 {
                     "kind": "call_recording",
@@ -51,6 +69,11 @@ def test_create_intake_call_keeps_artifact_as_private_reference() -> None:
     assert artifact["storage_provider"] == "gcs"
     assert artifact["storage_key"] == "intake-calls/call-001/recording.wav"
     assert "url" not in artifact
+    assert document["telephony"]["caller_phone_encrypted"].startswith("fernet:v1:")
+    assert "+919999999999" not in str(document)
+    assert "Asha Sharma" not in str(document)
+    assert "I need help with a separation." not in str(document)
+    assert encryptor.decrypt(document["intake"]["facts"][0]["value_encrypted"]) == "1 October 2026"
     assert response.json()["lawyer_review"]["status"] == "pending"
 
 
@@ -58,13 +81,14 @@ def test_create_intake_call_rejects_non_private_storage_reference() -> None:
     app = create_app()
     collection = FakeIntakeCallsCollection()
     app.dependency_overrides[get_intake_calls_collection] = lambda: collection
+    app.dependency_overrides[get_field_encryptor] = lambda: FieldEncryptor(
+        Fernet.generate_key().decode()
+    )
     payload = {
         "telephony": {
             "provider": "exotel",
             "provider_call_id": "call-002",
-            "incoming_number": "+919999999999",
-            "caller_phone_encrypted": "encrypted-caller-phone",
-            "caller_phone_masked": "+91******9999",
+            "caller_phone": "+919999999999",
             "started_at": "2026-10-15T10:00:00Z",
         },
         "intake": {
