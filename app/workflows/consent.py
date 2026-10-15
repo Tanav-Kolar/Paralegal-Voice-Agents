@@ -1,7 +1,10 @@
 """Consent gate that prevents intake collection before explicit caller approval."""
 
 import re
+from dataclasses import dataclass
 from enum import StrEnum
+
+from app.schemas.intake_call import LanguageChoice
 
 
 class ConsentState(StrEnum):
@@ -69,6 +72,51 @@ ENGLISH_CONSENT_UNCLEAR_CLOSURE = (
     "I was unable to confirm your consent, so I will not collect case information. "
     "Thank you for calling."
 )
+
+
+@dataclass(frozen=True)
+class ConsentDialogue:
+    language_code: str
+    prompt: str
+    reprompt: str
+    granted_response: str
+    declined_response: str
+    unclear_closure: str
+
+
+HINDI_CONSENT_DIALOGUE = ConsentDialogue(
+    language_code="hi-IN",
+    prompt=(
+        "नमस्ते। मैं लॉ फर्म की एआई इंटेक सहायक हूँ। मैं वकील की समीक्षा के लिए शुरुआती "
+        "जानकारी ले सकती हूँ, लेकिन कानूनी सलाह नहीं दे सकती। इस कॉल से वकील-ग्राहक संबंध "
+        "नहीं बनता। आपकी सहमति होने पर बातचीत रिकॉर्ड की जा सकती है और फर्म द्वारा समीक्षा "
+        "की जा सकती है। क्या आप आगे बढ़ने के लिए सहमति देते हैं? कृपया हाँ या नहीं कहें।"
+    ),
+    reprompt="कृपया हाँ या नहीं कहें। क्या आप आगे बढ़ने के लिए सहमति देते हैं?",
+    granted_response="धन्यवाद। आपकी सहमति प्राप्त हो गई है। इंटेक प्रक्रिया अब आगे बढ़ेगी।",
+    declined_response="मैं समझती हूँ। मैं मामले की जानकारी एकत्र नहीं करूँगी। कॉल करने के लिए धन्यवाद।",
+    unclear_closure=(
+        "मैं आपकी सहमति की पुष्टि नहीं कर सकी, इसलिए मैं मामले की जानकारी एकत्र नहीं करूँगी। "
+        "कॉल करने के लिए धन्यवाद।"
+    ),
+)
+
+ENGLISH_CONSENT_DIALOGUE = ConsentDialogue(
+    language_code="en-IN",
+    prompt=ENGLISH_CONSENT_PROMPT,
+    reprompt=ENGLISH_CONSENT_REPROMPT,
+    granted_response=ENGLISH_CONSENT_GRANTED_RESPONSE,
+    declined_response=ENGLISH_CONSENT_DECLINED_RESPONSE,
+    unclear_closure=ENGLISH_CONSENT_UNCLEAR_CLOSURE,
+)
+
+
+def get_consent_dialogue(language: LanguageChoice) -> ConsentDialogue:
+    """Return the consent copy and TTS language for the caller's explicit choice."""
+    return {
+        LanguageChoice.ENGLISH: ENGLISH_CONSENT_DIALOGUE,
+        LanguageChoice.HINDI: HINDI_CONSENT_DIALOGUE,
+    }[language]
 
 
 class ConsentWorkflow:

@@ -4,9 +4,11 @@ from base64 import b64decode, b64encode
 from binascii import Error as BinasciiError
 from datetime import UTC, datetime
 from hashlib import sha256
+from hmac import new as hmac_new
 from json import dumps
 from secrets import compare_digest
-from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+from uuid import UUID
 
 from fastapi import (
     APIRouter,
@@ -19,14 +21,27 @@ from fastapi import (
 )
 
 from app.core.config import Settings, get_settings
-from app.db.mongodb import get_call_events_collection
+from app.db.mongodb import (
+    get_call_events_collection,
+    get_intake_audit_events_collection,
+    get_intake_calls_collection,
+)
 from app.providers.contracts import (
     StreamingSpeechToTextSession,
     StreamingTextToSpeechProvider,
     TranscriptHandler,
 )
 from app.providers.sarvam import SarvamRealtimeSpeechToTextSession, SarvamStreamingTextToSpeech
-from app.schemas.intake_call import LanguageChoice
+from app.schemas.audit_event import IntakeAuditEventType
+from app.schemas.intake_call import (
+    CallStatus,
+    IntakeCallCreateRequest,
+    LanguageChoice,
+    TelephonyDetailsInput,
+)
+from app.security.field_encryption import FieldEncryptor, get_field_encryptor
+from app.services.audit import record_audit_event, record_intake_creation_audit_events
+from app.services.intake_encryption import encrypt_intake_call
 from app.workflows.consent import (
     ConsentAction,
     ConsentDialogue,
@@ -77,6 +92,16 @@ def _require_call_sid(params: dict[str, str]) -> str:
     return call_sid
 
 
+def _require_caller_phone(params: dict[str, str]) -> str:
+    caller_phone = _param(params, "CallFrom", "From")
+    if not caller_phone:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="caller phone required",
+        )
+    return caller_phone
+
+
 def _require_webhook_token(request: Request, settings: Settings) -> None:
     expected_token = settings.exotel_webhook_token
     provided_token = request.query_params.get("token", "")
@@ -99,7 +124,17 @@ def _recording_available(params: dict[str, str]) -> bool | None:
     return recording_url.lower() not in {"", "null", "none"}
 
 
-def _voicebot_stream_url(settings: Settings) -> str:
+def _voicebot_session_token(settings: Settings, call_sid: str) -> str:
+    return hmac_new(
+        settings.exotel_webhook_token.encode(), call_sid.encode(), sha256
+    ).hexdigest()
+
+
+def _voicebot_session_token_hash(session_token: str) -> str:
+    return sha256(session_token.encode()).hexdigest()
+
+
+def _voicebot_stream_url(settings: Settings, session_token: str) -> str:
     if not settings.public_base_url:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -118,7 +153,7 @@ def _voicebot_stream_url(settings: Settings) -> str:
         )
     userinfo = ":".join(
         (
-            quote(settings.exotel_voicebot_username, safe=""),
+            quote(f"{settings.exotel_voicebot_username}.{session_token}", safe=""),
             quote(settings.exotel_voicebot_password, safe=""),
         )
     )
@@ -127,27 +162,36 @@ def _voicebot_stream_url(settings: Settings) -> str:
             "wss" if public_url.scheme == "https" else "ws",
             f"{userinfo}@{public_url.netloc}",
             "/api/v1/telephony/exotel/voicebot/stream",
-            "",
+            urlencode({"session_token": session_token}),
             "",
         )
     )
 
 
-def _is_valid_voicebot_auth(websocket: WebSocket, settings: Settings) -> bool:
+def _voicebot_session_token_from_auth(websocket: WebSocket, settings: Settings) -> str | None:
     authorization = websocket.headers.get("authorization", "")
     if not authorization.startswith("Basic "):
-        return False
+        return None
     try:
         encoded_credentials = authorization.removeprefix("Basic ")
         username, password = b64decode(encoded_credentials, validate=True).decode().split(":", 1)
     except (BinasciiError, UnicodeDecodeError, ValueError):
-        return False
-    return bool(
-        settings.exotel_voicebot_username
-        and settings.exotel_voicebot_password
-        and compare_digest(username, settings.exotel_voicebot_username)
-        and compare_digest(password, settings.exotel_voicebot_password)
-    )
+        return None
+    if not settings.exotel_voicebot_username or not settings.exotel_voicebot_password:
+        return None
+    if not compare_digest(password, settings.exotel_voicebot_password):
+        return None
+    if compare_digest(username, settings.exotel_voicebot_username):
+        return ""
+    username_prefix = f"{settings.exotel_voicebot_username}."
+    if not username.startswith(username_prefix):
+        return None
+    session_token = username.removeprefix(username_prefix)
+    if len(session_token) != 64 or any(
+        character not in "0123456789abcdef" for character in session_token
+    ):
+        return None
+    return session_token
 
 
 def _create_stt_session(
@@ -222,6 +266,51 @@ async def _record_voicebot_session_event(
         )
 
 
+async def _create_voicebot_intake_call(
+    *,
+    collection,
+    audit_collection,
+    encryptor: FieldEncryptor,
+    call_sid: str,
+    caller_phone: str,
+    session_token: str,
+) -> None:
+    intake_call = encrypt_intake_call(
+        IntakeCallCreateRequest(
+            status=CallStatus.CONSENT_PENDING,
+            telephony=TelephonyDetailsInput(
+                provider="exotel",
+                provider_call_id=call_sid,
+                caller_phone=caller_phone,
+                started_at=datetime.now(UTC),
+            ),
+        ),
+        encryptor,
+    )
+    document = intake_call.model_dump(mode="json")
+    document["voicebot_session_token_hash"] = _voicebot_session_token_hash(session_token)
+    result = await collection.update_one(
+        {"telephony.provider_call_id": call_sid},
+        {"$setOnInsert": document},
+        upsert=True,
+    )
+    if result.upserted_id is not None:
+        await record_intake_creation_audit_events(audit_collection, intake_call)
+
+
+async def _update_voicebot_intake_call(
+    collection,
+    session_token_hash: str,
+    **fields: object,
+) -> None:
+    result = await collection.update_one(
+        {"voicebot_session_token_hash": session_token_hash},
+        {"$set": {**fields, "updated_at": datetime.now(UTC)}},
+    )
+    if result.matched_count != 1:
+        logger.warning("voicebot_intake_update_not_matched")
+
+
 @router.get("/exotel/passthru", status_code=status.HTTP_200_OK)
 async def exotel_passthru(
     request: Request,
@@ -245,11 +334,25 @@ async def exotel_passthru(
 async def exotel_voicebot_resolver(
     request: Request,
     settings: Settings = Depends(get_settings),
+    encryptor: FieldEncryptor = Depends(get_field_encryptor),
+    intake_collection=Depends(get_intake_calls_collection),
+    audit_collection=Depends(get_intake_audit_events_collection),
 ) -> dict[str, str]:
     """Return the authenticated WebSocket URL for an Exotel Voicebot call."""
     _require_webhook_token(request, settings)
-    _require_call_sid(dict(request.query_params))
-    return {"url": _voicebot_stream_url(settings)}
+    params = dict(request.query_params)
+    call_sid = _require_call_sid(params)
+    caller_phone = _require_caller_phone(params)
+    session_token = _voicebot_session_token(settings, call_sid)
+    await _create_voicebot_intake_call(
+        collection=intake_collection,
+        audit_collection=audit_collection,
+        encryptor=encryptor,
+        call_sid=call_sid,
+        caller_phone=caller_phone,
+        session_token=session_token,
+    )
+    return {"url": _voicebot_stream_url(settings, session_token)}
 
 
 @router.websocket("/exotel/voicebot/stream")
@@ -257,11 +360,26 @@ async def exotel_voicebot_stream(
     websocket: WebSocket,
     settings: Settings = Depends(get_settings),
     collection=Depends(get_call_events_collection),
+    intake_collection=Depends(get_intake_calls_collection),
+    audit_collection=Depends(get_intake_audit_events_collection),
 ) -> None:
     """Accept Exotel Voicebot messages without retaining or logging media payloads."""
-    if not _is_valid_voicebot_auth(websocket, settings):
+    session_token_from_auth = _voicebot_session_token_from_auth(websocket, settings)
+    if session_token_from_auth is None:
+        logger.warning("exotel_voicebot_authentication_rejected")
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
+
+    session_token = session_token_from_auth or websocket.query_params.get("session_token", "")
+    session_token_hash = _voicebot_session_token_hash(session_token)
+    intake_call = await intake_collection.find_one(
+        {"voicebot_session_token_hash": session_token_hash}, {"id": 1}
+    )
+    if not intake_call or not intake_call.get("id"):
+        logger.warning("exotel_voicebot_session_rejected")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    intake_call_id = UUID(str(intake_call["id"]))
 
     await websocket.accept()
     stream_sid: str | None = None
@@ -311,6 +429,11 @@ async def exotel_voicebot_stream(
                 return
             if action == LanguageSelectionAction.CLOSE_CALL:
                 await _record_voicebot_session_event(collection, stream_sid, "voicebot_close_call")
+                await _update_voicebot_intake_call(
+                    intake_collection,
+                    session_token_hash,
+                    status=CallStatus.ABANDONED.value,
+                )
                 await speak(LANGUAGE_SELECTION_UNCLEAR_CLOSURE)
                 return
 
@@ -323,6 +446,16 @@ async def exotel_voicebot_stream(
                 stream_sid,
                 "voicebot_language_selected",
                 language=selected_language,
+            )
+            await _update_voicebot_intake_call(
+                intake_collection,
+                session_token_hash,
+                **{
+                    "language.preferred": selected_language.value,
+                    "disclosures.recording_disclosure_given_at": datetime.now(UTC),
+                    "disclosures.no_advice_disclosure_given_at": datetime.now(UTC),
+                    "disclosures.no_engagement_disclosure_given_at": datetime.now(UTC),
+                },
             )
             consent_workflow.begin()
             await speak(
@@ -349,6 +482,39 @@ async def exotel_voicebot_stream(
             ConsentAction.CLOSE_CALL: selected_dialogue.unclear_closure,
         }[action]
         await _record_voicebot_session_event(collection, stream_sid, f"voicebot_{action}")
+        if action == ConsentAction.CONSENT_GRANTED:
+            consent_value: bool | None = True
+            call_status = CallStatus.IN_PROGRESS
+        elif action == ConsentAction.CONSENT_DECLINED:
+            consent_value = False
+            call_status = CallStatus.CONSENT_DECLINED
+        elif action == ConsentAction.CLOSE_CALL:
+            consent_value = None
+            call_status = CallStatus.ABANDONED
+        else:
+            consent_value = None
+            call_status = None
+        if call_status:
+            consent_fields: dict[str, object] = {"status": call_status.value}
+            if consent_value is not None:
+                consent_fields.update(
+                    {
+                        "disclosures.recording_consent": consent_value,
+                        "disclosures.recording_consent_at": datetime.now(UTC),
+                        "disclosures.intake_consent": consent_value,
+                        "disclosures.intake_consent_at": datetime.now(UTC),
+                    }
+                )
+            await _update_voicebot_intake_call(
+                intake_collection, session_token_hash, **consent_fields
+            )
+            if consent_value is not None:
+                await record_audit_event(
+                    audit_collection,
+                    intake_call_id=intake_call_id,
+                    event_type=IntakeAuditEventType.CONSENT_RECORDED,
+                    details={"intake_consent": consent_value},
+                )
         try:
             await speak(
                 response,
@@ -385,6 +551,11 @@ async def exotel_voicebot_stream(
                 try:
                     stt_session = _create_stt_session(settings, on_transcript)
                     await stt_session.start()
+                    await _update_voicebot_intake_call(
+                        intake_collection,
+                        session_token_hash,
+                        **{"disclosures.ai_identity_given_at": datetime.now(UTC)},
+                    )
                     await speak_consent_prompt()
                 except (OSError, ValueError):
                     logger.exception("voicebot_session_start_failed stream_sid=%s", stream_sid)

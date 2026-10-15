@@ -1,14 +1,21 @@
 from base64 import b64encode
+from urllib.parse import urlsplit
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from app.api.routes.telephony import LANGUAGE_SELECTION_PROMPT
 from app.core.config import Settings, get_settings
-from app.db.mongodb import get_call_events_collection
+from app.db.mongodb import (
+    get_call_events_collection,
+    get_intake_audit_events_collection,
+    get_intake_calls_collection,
+)
 from app.main import create_app
 from app.providers.contracts import TranscriptHandler
+from app.security.field_encryption import FieldEncryptor, get_field_encryptor
 from app.workflows.consent import (
     ENGLISH_CONSENT_GRANTED_RESPONSE,
     ENGLISH_CONSENT_PROMPT,
@@ -35,8 +42,67 @@ class FakeCollection:
 
 
 class FakeUpdateResult:
-    def __init__(self, upserted_id: str | None) -> None:
+    def __init__(self, upserted_id: str | None, matched_count: int = 0) -> None:
         self.upserted_id = upserted_id
+        self.matched_count = matched_count
+
+
+class FakeIntakeCallsCollection:
+    def __init__(self) -> None:
+        self.documents: list[dict] = []
+
+    async def update_one(
+        self, filter: dict, update: dict, *, upsert: bool = False
+    ) -> FakeUpdateResult:
+        document = next(
+            (candidate for candidate in self.documents if _matches_filter(candidate, filter)), None
+        )
+        if document is None:
+            if not upsert:
+                return FakeUpdateResult(upserted_id=None)
+            document = update["$setOnInsert"]
+            self.documents.append(document)
+            return FakeUpdateResult(upserted_id="inserted")
+        for key, value in update.get("$set", {}).items():
+            _set_nested_value(document, key, value)
+        return FakeUpdateResult(upserted_id=None, matched_count=1)
+
+    async def find_one(self, filter: dict, projection: dict | None = None) -> dict | None:
+        document = next(
+            (candidate for candidate in self.documents if _matches_filter(candidate, filter)), None
+        )
+        if document is None or projection is None:
+            return document
+        return {key: document[key] for key in projection if key in document}
+
+
+class FakeAuditEventsCollection:
+    def __init__(self) -> None:
+        self.documents: list[dict] = []
+
+    async def insert_one(self, document: dict) -> None:
+        self.documents.append(document)
+
+
+def _matches_filter(document: dict, filter: dict) -> bool:
+    return all(_nested_value(document, key) == value for key, value in filter.items())
+
+
+def _nested_value(document: dict, key: str):
+    value = document
+    for part in key.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+    return value
+
+
+def _set_nested_value(document: dict, key: str, value: object) -> None:
+    parts = key.split(".")
+    target = document
+    for part in parts[:-1]:
+        target = target.setdefault(part, {})
+    target[parts[-1]] = value
 
 
 class FakeStreamingSpeechToTextSession:
@@ -90,6 +156,10 @@ def make_client() -> tuple[
 
     app = create_app()
     events = FakeCollection()
+    intake_calls = FakeIntakeCallsCollection()
+    audit_events = FakeAuditEventsCollection()
+    events.intake_calls = intake_calls
+    events.audit_events = audit_events
     stt_sessions: list[FakeStreamingSpeechToTextSession] = []
     tts_providers: list[FakeStreamingTextToSpeechProvider] = []
     settings = Settings(
@@ -117,9 +187,24 @@ def make_client() -> tuple[
 
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_call_events_collection] = lambda: events
+    app.dependency_overrides[get_intake_calls_collection] = lambda: intake_calls
+    app.dependency_overrides[get_intake_audit_events_collection] = lambda: audit_events
+    app.dependency_overrides[get_field_encryptor] = lambda: FieldEncryptor(
+        Fernet.generate_key().decode()
+    )
     telephony._create_stt_session = create_fake_stt_session
     telephony._create_tts_provider = create_fake_tts_provider
     return TestClient(app), events, stt_sessions, tts_providers
+
+
+def resolve_voicebot_stream_path(client: TestClient, call_sid: str) -> str:
+    response = client.get(
+        "/api/v1/telephony/exotel/voicebot?"
+        f"CallSid={call_sid}&CallFrom=%2B919999999999&token={WEBHOOK_TOKEN}"
+    )
+    assert response.status_code == 200
+    url = urlsplit(response.json()["url"])
+    return f"{url.path}?{url.query}"
 
 
 def test_exotel_passthru_records_event() -> None:
@@ -233,41 +318,45 @@ def test_exotel_webhooks_reject_an_invalid_token() -> None:
 
 
 def test_exotel_voicebot_resolver_returns_websocket_url() -> None:
-    client, _, _, _ = make_client()
+    client, events, _, _ = make_client()
     with client:
         response = client.get(
-            f"/api/v1/telephony/exotel/voicebot?CallSid=sid-voicebot&token={WEBHOOK_TOKEN}"
+            "/api/v1/telephony/exotel/voicebot?CallSid=sid-voicebot"
+            f"&CallFrom=%2B919999999999&token={WEBHOOK_TOKEN}"
         )
 
     assert response.status_code == 200
-    assert response.json() == {
-        "url": "wss://test-voicebot:test-voicebot-password@demo.example.test/"
-        "api/v1/telephony/exotel/voicebot/stream"
-    }
+    url = urlsplit(response.json()["url"])
+    assert url.scheme == "wss"
+    assert url.username is not None
+    assert url.username.startswith("test-voicebot.")
+    assert url.password == "test-voicebot-password"
+    assert url.hostname == "demo.example.test"
+    assert url.path == "/api/v1/telephony/exotel/voicebot/stream"
+    assert "session_token=" in url.query
+    assert events.intake_calls.documents[0]["status"] == "consent_pending"
+    assert "+919999999999" not in str(events.intake_calls.documents)
+    assert [event["event_type"] for event in events.audit_events.documents] == ["intake_created"]
 
 
 def test_exotel_voicebot_stream_requires_basic_authentication() -> None:
     client, _, _, _ = make_client()
     with client, pytest.raises(WebSocketDisconnect) as error:
-        with client.websocket_connect("/api/v1/telephony/exotel/voicebot/stream"):
+        stream_path = resolve_voicebot_stream_path(client, "sid-unauthenticated")
+        with client.websocket_connect(stream_path):
             pass
 
     assert error.value.code == 1008
 
 
 def test_exotel_voicebot_stream_resolves_database_dependency_for_websocket() -> None:
-    app = create_app()
-    settings = Settings(
-        _env_file=None,
-        exotel_voicebot_username=VOICEBOT_USERNAME,
-        exotel_voicebot_password=VOICEBOT_PASSWORD,
-    )
-    app.dependency_overrides[get_settings] = lambda: settings
+    client, _, _, _ = make_client()
     credentials = b64encode(f"{VOICEBOT_USERNAME}:{VOICEBOT_PASSWORD}".encode()).decode()
 
-    with TestClient(app) as client:
+    with client:
+        stream_path = resolve_voicebot_stream_path(client, "sid-dependency")
         with client.websocket_connect(
-            "/api/v1/telephony/exotel/voicebot/stream",
+            stream_path,
             headers={"Authorization": f"Basic {credentials}"},
         ):
             pass
@@ -277,8 +366,9 @@ def test_exotel_voicebot_stream_relays_media_to_sarvam_stt_and_plays_language_pr
     client, events, stt_sessions, tts_providers = make_client()
     credentials = b64encode(f"{VOICEBOT_USERNAME}:{VOICEBOT_PASSWORD}".encode()).decode()
     with client:
+        stream_path = resolve_voicebot_stream_path(client, "sid-stream-test")
         with client.websocket_connect(
-            "/api/v1/telephony/exotel/voicebot/stream",
+            stream_path,
             headers={"Authorization": f"Basic {credentials}"},
         ) as websocket:
             websocket.send_json(
@@ -309,8 +399,9 @@ def test_exotel_voicebot_stream_routes_final_consent_to_tts_response() -> None:
     client, events, stt_sessions, tts_providers = make_client()
     credentials = b64encode(f"{VOICEBOT_USERNAME}:{VOICEBOT_PASSWORD}".encode()).decode()
     with client:
+        stream_path = resolve_voicebot_stream_path(client, "sid-consent-yes")
         with client.websocket_connect(
-            "/api/v1/telephony/exotel/voicebot/stream",
+            stream_path,
             headers={"Authorization": f"Basic {credentials}"},
         ) as websocket:
             websocket.send_json(
@@ -347,14 +438,25 @@ def test_exotel_voicebot_stream_routes_final_consent_to_tts_response() -> None:
         "voicebot_consent_granted",
         "voicebot_stream_stopped",
     ]
+    intake_call = events.intake_calls.documents[0]
+    assert intake_call["status"] == "in_progress"
+    assert intake_call["language"]["preferred"] == "english"
+    assert intake_call["disclosures"]["recording_consent"] is True
+    assert intake_call["disclosures"]["intake_consent"] is True
+    assert "voicebot_session_token_hash" in intake_call
+    assert [event["event_type"] for event in events.audit_events.documents] == [
+        "intake_created",
+        "consent_recorded",
+    ]
 
 
 def test_exotel_voicebot_stream_reprompts_then_stops_processing_unclear_consent() -> None:
     client, events, stt_sessions, tts_providers = make_client()
     credentials = b64encode(f"{VOICEBOT_USERNAME}:{VOICEBOT_PASSWORD}".encode()).decode()
     with client:
+        stream_path = resolve_voicebot_stream_path(client, "sid-consent-unclear")
         with client.websocket_connect(
-            "/api/v1/telephony/exotel/voicebot/stream",
+            stream_path,
             headers={"Authorization": f"Basic {credentials}"},
         ) as websocket:
             websocket.send_json(
@@ -398,8 +500,9 @@ def test_exotel_voicebot_stream_uses_hindi_consent_dialogue() -> None:
     client, events, stt_sessions, tts_providers = make_client()
     credentials = b64encode(f"{VOICEBOT_USERNAME}:{VOICEBOT_PASSWORD}".encode()).decode()
     with client:
+        stream_path = resolve_voicebot_stream_path(client, "sid-hindi-consent")
         with client.websocket_connect(
-            "/api/v1/telephony/exotel/voicebot/stream",
+            stream_path,
             headers={"Authorization": f"Basic {credentials}"},
         ) as websocket:
             websocket.send_json(
