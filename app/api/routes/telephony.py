@@ -1,9 +1,11 @@
 import logging
 from datetime import UTC, datetime
+from secrets import compare_digest
 from urllib.parse import parse_qsl
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from app.core.config import Settings, get_settings
 from app.db.mongodb import get_call_events_collection
 
 router = APIRouter()
@@ -34,6 +36,21 @@ def _require_call_sid(params: dict[str, str]) -> str:
     return call_sid
 
 
+def _require_webhook_token(request: Request, settings: Settings) -> None:
+    expected_token = settings.exotel_webhook_token
+    provided_token = request.query_params.get("token", "")
+    if not expected_token:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Exotel webhook token is not configured",
+        )
+    if not compare_digest(provided_token, expected_token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized Exotel webhook",
+        )
+
+
 async def _record_event(collection, call_sid: str, event_type: str, **fields) -> None:
     await collection.insert_one(
         {
@@ -50,9 +67,11 @@ async def _record_event(collection, call_sid: str, event_type: str, **fields) ->
 @router.get("/exotel/passthru", status_code=status.HTTP_200_OK)
 async def exotel_passthru(
     request: Request,
+    settings: Settings = Depends(get_settings),
     collection=Depends(get_call_events_collection),
 ) -> dict[str, str]:
     """Record an Exotel Passthru callback as a lifecycle event, without caller data."""
+    _require_webhook_token(request, settings)
     params = dict(request.query_params)
     call_sid = _require_call_sid(params)
     direction = _param(params, "Direction", "direction") or "unknown"
@@ -63,9 +82,11 @@ async def exotel_passthru(
 @router.api_route("/exotel/status", methods=["GET", "POST"], status_code=status.HTTP_200_OK)
 async def exotel_status(
     request: Request,
+    settings: Settings = Depends(get_settings),
     collection=Depends(get_call_events_collection),
 ) -> dict[str, str]:
     """Record an Exotel call-status callback (query string or form body)."""
+    _require_webhook_token(request, settings)
     # ponytail: stdlib form parsing avoids python-multipart; JSON callbacks are not handled.
     body = (await request.body()).decode()
     params = {**dict(request.query_params), **dict(parse_qsl(body))}

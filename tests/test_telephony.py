@@ -1,7 +1,10 @@
 from fastapi.testclient import TestClient
 
+from app.core.config import Settings, get_settings
 from app.db.mongodb import get_call_events_collection
 from app.main import create_app
+
+WEBHOOK_TOKEN = "test-webhook-token"
 
 
 class FakeCollection:
@@ -15,6 +18,8 @@ class FakeCollection:
 def make_client() -> tuple[TestClient, FakeCollection]:
     app = create_app()
     events = FakeCollection()
+    settings = Settings(_env_file=None, exotel_webhook_token=WEBHOOK_TOKEN)
+    app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_call_events_collection] = lambda: events
     return TestClient(app), events
 
@@ -24,6 +29,7 @@ def test_exotel_passthru_records_event() -> None:
     with client:
         response = client.get(
             "/api/v1/telephony/exotel/passthru?callsid=demo-call-001&direction=inbound"
+            f"&token={WEBHOOK_TOKEN}"
         )
 
     assert response.status_code == 200
@@ -46,6 +52,7 @@ def test_exotel_passthru_accepts_exotel_parameter_casing() -> None:
     with client:
         response = client.get(
             "/api/v1/telephony/exotel/passthru?CallSid=exotel-call-001&Direction=incoming"
+            f"&token={WEBHOOK_TOKEN}"
         )
 
     assert response.status_code == 200
@@ -56,7 +63,7 @@ def test_exotel_passthru_accepts_exotel_parameter_casing() -> None:
 def test_exotel_passthru_requires_call_sid() -> None:
     client, events = make_client()
     with client:
-        response = client.get("/api/v1/telephony/exotel/passthru")
+        response = client.get(f"/api/v1/telephony/exotel/passthru?token={WEBHOOK_TOKEN}")
 
     assert response.status_code == 422
     assert response.json() == {"detail": "callsid required"}
@@ -67,7 +74,7 @@ def test_exotel_status_records_form_body_without_phone_numbers() -> None:
     client, events = make_client()
     with client:
         response = client.post(
-            "/api/v1/telephony/exotel/status",
+            f"/api/v1/telephony/exotel/status?token={WEBHOOK_TOKEN}",
             content="CallSid=sid-1&Status=completed&Duration=42&From=%2B910000000000"
             "&RecordingUrl=https%3A%2F%2Fexample.com%2Fr.mp3",
             headers={"content-type": "application/x-www-form-urlencoded"},
@@ -86,10 +93,24 @@ def test_exotel_status_records_form_body_without_phone_numbers() -> None:
 def test_exotel_status_accepts_query_string_and_requires_call_sid() -> None:
     client, events = make_client()
     with client:
-        ok = client.get("/api/v1/telephony/exotel/status?CallSid=sid-2&Status=busy")
-        missing = client.post("/api/v1/telephony/exotel/status", content="Status=busy")
+        ok = client.get(
+            f"/api/v1/telephony/exotel/status?CallSid=sid-2&Status=busy&token={WEBHOOK_TOKEN}"
+        )
+        missing = client.post(
+            f"/api/v1/telephony/exotel/status?token={WEBHOOK_TOKEN}",
+            content="Status=busy",
+        )
 
     assert ok.status_code == 200
     assert events.documents[0]["call_status"] == "busy"
     assert missing.status_code == 422
     assert len(events.documents) == 1
+
+
+def test_exotel_webhooks_reject_an_invalid_token() -> None:
+    client, events = make_client()
+    with client:
+        response = client.get("/api/v1/telephony/exotel/passthru?CallSid=sid-3&token=invalid")
+
+    assert response.status_code == 401
+    assert events.documents == []

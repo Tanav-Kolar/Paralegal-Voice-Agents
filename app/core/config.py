@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     exotel_api_key: str = ""
     exotel_api_token: str = ""
     exotel_api_base_url: str = "https://api.in.exotel.com"
+    exotel_webhook_token: str = ""
     speech_to_text_provider: str = "sarvam"
     text_to_speech_provider: str = "sarvam"
     sarvam_api_key: str = ""
