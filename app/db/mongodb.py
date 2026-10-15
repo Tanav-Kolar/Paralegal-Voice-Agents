@@ -1,8 +1,8 @@
 from collections.abc import AsyncIterator
 
-from fastapi import Request
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.collection import AsyncCollection
+from starlette.requests import HTTPConnection
 
 from app.core.config import Settings
 
@@ -18,17 +18,17 @@ class MongoDB:
         await self.client.close()
 
 
-async def get_mongodb(request: Request) -> AsyncIterator[MongoDB]:
-    yield request.app.state.mongodb
+async def get_mongodb(connection: HTTPConnection) -> AsyncIterator[MongoDB]:
+    yield connection.app.state.mongodb
 
 
-def get_call_events_collection(request: Request) -> AsyncCollection:
-    return request.app.state.mongodb.database["call_events"]
+def get_call_events_collection(connection: HTTPConnection) -> AsyncCollection:
+    return connection.app.state.mongodb.database["call_events"]
 
 
-def get_intake_calls_collection(request: Request) -> AsyncCollection:
-    return request.app.state.mongodb.database["intake_calls"]
+def get_intake_calls_collection(connection: HTTPConnection) -> AsyncCollection:
+    return connection.app.state.mongodb.database["intake_calls"]
 
 
-def get_intake_audit_events_collection(request: Request) -> AsyncCollection:
-    return request.app.state.mongodb.database["intake_audit_events"]
+def get_intake_audit_events_collection(connection: HTTPConnection) -> AsyncCollection:
+    return connection.app.state.mongodb.database["intake_audit_events"]

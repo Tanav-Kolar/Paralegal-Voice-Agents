@@ -210,6 +210,24 @@ def test_exotel_voicebot_stream_requires_basic_authentication() -> None:
     assert error.value.code == 1008
 
 
+def test_exotel_voicebot_stream_resolves_database_dependency_for_websocket() -> None:
+    app = create_app()
+    settings = Settings(
+        _env_file=None,
+        exotel_voicebot_username=VOICEBOT_USERNAME,
+        exotel_voicebot_password=VOICEBOT_PASSWORD,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    credentials = b64encode(f"{VOICEBOT_USERNAME}:{VOICEBOT_PASSWORD}".encode()).decode()
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/api/v1/telephony/exotel/voicebot/stream",
+            headers={"Authorization": f"Basic {credentials}"},
+        ):
+            pass
+
+
 def test_exotel_voicebot_stream_relays_media_to_sarvam_stt() -> None:
     client, events, stt_sessions = make_client()
     credentials = b64encode(f"{VOICEBOT_USERNAME}:{VOICEBOT_PASSWORD}".encode()).decode()
