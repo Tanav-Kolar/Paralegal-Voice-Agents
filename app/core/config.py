@@ -29,9 +29,17 @@ class Settings(BaseSettings):
     exotel_api_token: str = ""
     exotel_api_base_url: str = "https://api.in.exotel.com"
     exotel_webhook_token: str = ""
+    public_base_url: str = ""
+    exotel_voicebot_username: str = ""
+    exotel_voicebot_password: str = ""
     speech_to_text_provider: str = "sarvam"
     text_to_speech_provider: str = "sarvam"
     sarvam_api_key: str = ""
+    sarvam_stt_language_code: str = "auto"
+    sarvam_stt_model: str = "saaras:v3-realtime"
+    sarvam_stt_stream_type: str = "fast"
+    sarvam_stt_sample_rate: int = 8000
+    sarvam_stt_mode: str = "codemix"
     object_storage_provider: str = "unconfigured"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -42,6 +50,13 @@ class Settings(BaseSettings):
         if isinstance(value, list):
             return value
         return [item.strip() for item in value.split(",") if item.strip()]
+
+    @field_validator("sarvam_stt_sample_rate")
+    @classmethod
+    def validate_sarvam_stt_sample_rate(cls, value: int) -> int:
+        if value not in {8000, 16000}:
+            raise ValueError("SARVAM_STT_SAMPLE_RATE must be 8000 or 16000")
+        return value
 
 
 @lru_cache

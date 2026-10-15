@@ -1,14 +1,26 @@
 import logging
+from base64 import b64decode
+from binascii import Error as BinasciiError
 from datetime import UTC, datetime
 from hashlib import sha256
 from json import dumps
 from secrets import compare_digest
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 
 from app.core.config import Settings, get_settings
 from app.db.mongodb import get_call_events_collection
+from app.providers.contracts import StreamingSpeechToTextSession, TranscriptHandler
+from app.providers.sarvam import SarvamRealtimeSpeechToTextSession
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -57,6 +69,65 @@ def _recording_available(params: dict[str, str]) -> bool | None:
     if recording_url is None:
         return None
     return recording_url.lower() not in {"", "null", "none"}
+
+
+def _voicebot_stream_url(settings: Settings) -> str:
+    if not settings.public_base_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Public base URL is not configured",
+        )
+    public_url = urlsplit(settings.public_base_url)
+    if public_url.scheme not in {"http", "https"} or not public_url.netloc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Public base URL must be an HTTP(S) URL",
+        )
+    if not settings.exotel_voicebot_username or not settings.exotel_voicebot_password:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Exotel Voicebot credentials are not configured",
+        )
+    userinfo = ":".join(
+        (
+            quote(settings.exotel_voicebot_username, safe=""),
+            quote(settings.exotel_voicebot_password, safe=""),
+        )
+    )
+    return urlunsplit(
+        (
+            "wss" if public_url.scheme == "https" else "ws",
+            f"{userinfo}@{public_url.netloc}",
+            "/api/v1/telephony/exotel/voicebot/stream",
+            "",
+            "",
+        )
+    )
+
+
+def _is_valid_voicebot_auth(websocket: WebSocket, settings: Settings) -> bool:
+    authorization = websocket.headers.get("authorization", "")
+    if not authorization.startswith("Basic "):
+        return False
+    try:
+        encoded_credentials = authorization.removeprefix("Basic ")
+        username, password = b64decode(encoded_credentials, validate=True).decode().split(":", 1)
+    except (BinasciiError, UnicodeDecodeError, ValueError):
+        return False
+    return bool(
+        settings.exotel_voicebot_username
+        and settings.exotel_voicebot_password
+        and compare_digest(username, settings.exotel_voicebot_username)
+        and compare_digest(password, settings.exotel_voicebot_password)
+    )
+
+
+def _create_stt_session(
+    settings: Settings, on_transcript: TranscriptHandler
+) -> StreamingSpeechToTextSession:
+    if settings.speech_to_text_provider != "sarvam":
+        raise ValueError("Sarvam must be configured as the speech-to-text provider")
+    return SarvamRealtimeSpeechToTextSession(settings, on_transcript)
 
 
 def _event_key(call_sid: str, event_type: str, fields: dict[str, object]) -> str:
@@ -112,6 +183,71 @@ async def exotel_passthru(
         "provider": "exotel",
         "call_sid": call_sid,
     }
+
+
+@router.get("/exotel/voicebot", status_code=status.HTTP_200_OK)
+async def exotel_voicebot_resolver(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    """Return the authenticated WebSocket URL for an Exotel Voicebot call."""
+    _require_webhook_token(request, settings)
+    _require_call_sid(dict(request.query_params))
+    return {"url": _voicebot_stream_url(settings)}
+
+
+@router.websocket("/exotel/voicebot/stream")
+async def exotel_voicebot_stream(
+    websocket: WebSocket,
+    settings: Settings = Depends(get_settings),
+) -> None:
+    """Accept Exotel Voicebot messages without retaining or logging media payloads."""
+    if not _is_valid_voicebot_auth(websocket, settings):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    await websocket.accept()
+    stream_sid: str | None = None
+    stt_session: StreamingSpeechToTextSession | None = None
+
+    async def on_transcript(event_type: str, transcript: str, language: str | None) -> None:
+        logger.info(
+            "sarvam_stt_transcript_received stream_sid=%s event=%s language=%s characters=%d",
+            stream_sid,
+            event_type,
+            language or "unknown",
+            len(transcript),
+        )
+
+    try:
+        while True:
+            message = await websocket.receive_json()
+            event_type = message.get("event")
+            if event_type == "start":
+                stream_sid = message.get("start", {}).get("stream_sid")
+                logger.info("exotel_voicebot_stream_started stream_sid=%s", stream_sid)
+                try:
+                    stt_session = _create_stt_session(settings, on_transcript)
+                    await stt_session.start()
+                except (OSError, ValueError):
+                    logger.exception("sarvam_stt_session_start_failed stream_sid=%s", stream_sid)
+                    await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+                    return
+            elif event_type == "media" and stt_session:
+                payload = message.get("media", {}).get("payload")
+                if isinstance(payload, str) and payload:
+                    await stt_session.send_audio(payload)
+            elif event_type == "stop":
+                logger.info("exotel_voicebot_stream_stopped stream_sid=%s", stream_sid)
+                if stt_session:
+                    await stt_session.stop()
+                await websocket.close()
+                return
+    except WebSocketDisconnect:
+        logger.info("exotel_voicebot_stream_disconnected stream_sid=%s", stream_sid)
+    finally:
+        if stt_session:
+            await stt_session.stop()
 
 
 @router.api_route("/exotel/status", methods=["GET", "POST"], status_code=status.HTTP_200_OK)

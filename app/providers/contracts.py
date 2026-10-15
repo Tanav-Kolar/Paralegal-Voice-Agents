@@ -1,5 +1,6 @@
 """Interfaces that isolate workflow logic from external service vendors."""
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
@@ -48,6 +49,17 @@ class TelephonyProvider(Protocol):
 
 class SpeechToTextProvider(Protocol):
     async def transcribe(self, audio: SpeechAudio) -> list[TranscriptSegment]: ...
+
+
+TranscriptHandler = Callable[[str, str, str | None], Awaitable[None]]
+
+
+class StreamingSpeechToTextSession(Protocol):
+    async def start(self) -> None: ...
+
+    async def send_audio(self, audio_payload: str) -> None: ...
+
+    async def stop(self) -> None: ...
 
 
 class TextToSpeechProvider(Protocol):
