@@ -1,4 +1,5 @@
 import logging
+from asyncio import Lock
 from base64 import b64decode, b64encode
 from binascii import Error as BinasciiError
 from datetime import UTC, datetime
@@ -25,7 +26,16 @@ from app.providers.contracts import (
     TranscriptHandler,
 )
 from app.providers.sarvam import SarvamRealtimeSpeechToTextSession, SarvamStreamingTextToSpeech
-from app.workflows.consent import ENGLISH_CONSENT_PROMPT, ConsentAction, ConsentWorkflow
+from app.workflows.consent import (
+    ENGLISH_CONSENT_DECLINED_RESPONSE,
+    ENGLISH_CONSENT_GRANTED_RESPONSE,
+    ENGLISH_CONSENT_PROMPT,
+    ENGLISH_CONSENT_REPROMPT,
+    ENGLISH_CONSENT_UNCLEAR_CLOSURE,
+    ConsentAction,
+    ConsentState,
+    ConsentWorkflow,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -237,6 +247,19 @@ async def exotel_voicebot_stream(
     stream_sid: str | None = None
     stt_session: StreamingSpeechToTextSession | None = None
     consent_workflow = ConsentWorkflow()
+    speech_lock = Lock()
+
+    async def speak(text: str) -> None:
+        async with speech_lock:
+            tts_provider = _create_tts_provider(settings)
+            async for audio in tts_provider.stream(text):
+                await websocket.send_json(
+                    {
+                        "event": "media",
+                        "stream_sid": stream_sid,
+                        "media": {"payload": b64encode(audio.content).decode()},
+                    }
+                )
 
     async def on_transcript(event_type: str, transcript: str, language: str | None) -> None:
         logger.info(
@@ -246,19 +269,40 @@ async def exotel_voicebot_stream(
             language or "unknown",
             len(transcript),
         )
+        if event_type != "transcript.final":
+            return
+        if consent_workflow.state != ConsentState.AWAITING_CONSENT:
+            logger.info(
+                "consent_transcript_ignored stream_sid=%s state=%s",
+                stream_sid,
+                consent_workflow.state,
+            )
+            return
+
+        action = consent_workflow.handle_response(transcript)
+        response = {
+            ConsentAction.REPROMPT_CONSENT: ENGLISH_CONSENT_REPROMPT,
+            ConsentAction.CONSENT_GRANTED: ENGLISH_CONSENT_GRANTED_RESPONSE,
+            ConsentAction.CONSENT_DECLINED: ENGLISH_CONSENT_DECLINED_RESPONSE,
+            ConsentAction.CLOSE_CALL: ENGLISH_CONSENT_UNCLEAR_CLOSURE,
+        }[action]
+        await _record_voicebot_session_event(collection, stream_sid, f"voicebot_{action}")
+        try:
+            await speak(response)
+        except (OSError, ValueError):
+            logger.exception(
+                "sarvam_tts_response_failed stream_sid=%s action=%s", stream_sid, action
+            )
+            await _record_voicebot_session_event(
+                collection, stream_sid, "voicebot_tts_response_failed"
+            )
+            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+            return
 
     async def speak_consent_prompt() -> None:
         if consent_workflow.begin() != ConsentAction.REQUEST_CONSENT:
             return
-        tts_provider = _create_tts_provider(settings)
-        async for audio in tts_provider.stream(ENGLISH_CONSENT_PROMPT):
-            await websocket.send_json(
-                {
-                    "event": "media",
-                    "stream_sid": stream_sid,
-                    "media": {"payload": b64encode(audio.content).decode()},
-                }
-            )
+        await speak(ENGLISH_CONSENT_PROMPT)
 
     try:
         while True:
@@ -275,13 +319,17 @@ async def exotel_voicebot_stream(
                     await stt_session.start()
                     await speak_consent_prompt()
                 except (OSError, ValueError):
-                    logger.exception("sarvam_stt_session_start_failed stream_sid=%s", stream_sid)
+                    logger.exception("voicebot_session_start_failed stream_sid=%s", stream_sid)
                     await _record_voicebot_session_event(
                         collection, stream_sid, "voicebot_stt_start_failed"
                     )
                     await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
                     return
-            elif event_type == "media" and stt_session:
+            elif (
+                event_type == "media"
+                and stt_session
+                and consent_workflow.state == ConsentState.AWAITING_CONSENT
+            ):
                 payload = message.get("media", {}).get("payload")
                 if isinstance(payload, str) and payload:
                     await stt_session.send_audio(payload)

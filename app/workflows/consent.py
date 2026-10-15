@@ -24,7 +24,6 @@ _AFFIRMATIVE_TERMS = {
     "yes",
     "yeah",
     "yep",
-    "sure",
     "i consent",
     "i agree",
     "haan",
@@ -58,6 +57,17 @@ ENGLISH_CONSENT_PROMPT = (
     "for a lawyer to review, but I cannot give legal advice, and this call does not create a "
     "lawyer-client relationship. If you consent, this conversation may be recorded and reviewed "
     "by the firm. Do you consent to continue? Please say yes or no."
+)
+ENGLISH_CONSENT_REPROMPT = "Please answer yes or no. Do you consent to continue?"
+ENGLISH_CONSENT_GRANTED_RESPONSE = (
+    "Thank you. I have your consent. The intake workflow will now continue."
+)
+ENGLISH_CONSENT_DECLINED_RESPONSE = (
+    "I understand. I will not collect case information. Thank you for calling. Goodbye."
+)
+ENGLISH_CONSENT_UNCLEAR_CLOSURE = (
+    "I was unable to confirm your consent, so I will not collect case information. "
+    "Thank you for calling. Goodbye."
 )
 
 
