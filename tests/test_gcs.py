@@ -1,7 +1,9 @@
+from unittest.mock import patch
 from uuid import UUID
 
 import pytest
 
+from app.core.config import Settings
 from app.providers.gcs import GoogleCloudStorageProvider
 
 
@@ -63,3 +65,17 @@ async def test_gcs_provider_rejects_unsafe_download_key() -> None:
 
     with pytest.raises(ValueError, match="Storage key is invalid"):
         await provider.create_download_url("../recording.wav")
+
+
+def test_gcs_provider_uses_application_default_credentials_without_key_file() -> None:
+    settings = Settings(
+        _env_file=None,
+        object_storage_provider="gcs",
+        gcs_project_id="demo-project",
+        gcs_bucket_name="demo-private-bucket",
+    )
+
+    with patch("app.providers.gcs.storage.Client") as client_factory:
+        GoogleCloudStorageProvider.from_settings(settings)
+
+    client_factory.assert_called_once_with(project="demo-project")

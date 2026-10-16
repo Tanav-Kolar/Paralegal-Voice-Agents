@@ -27,20 +27,25 @@ from app.db.mongodb import (
     get_intake_calls_collection,
 )
 from app.providers.contracts import (
+    ObjectStorageProvider,
     StreamingSpeechToTextSession,
     StreamingTextToSpeechProvider,
     TranscriptHandler,
 )
+from app.providers.gcs import GoogleCloudStorageProvider
 from app.providers.sarvam import SarvamRealtimeSpeechToTextSession, SarvamStreamingTextToSpeech
 from app.schemas.audit_event import IntakeAuditEventType
 from app.schemas.intake_call import (
+    ArtifactKind,
     CallStatus,
     IntakeCallCreateRequest,
     LanguageChoice,
+    ProtectedObjectReference,
     TelephonyDetailsInput,
 )
 from app.security.field_encryption import FieldEncryptor, get_field_encryptor
 from app.services.audit import record_audit_event, record_intake_creation_audit_events
+from app.services.call_recording import ConsentGatedCallRecorder
 from app.services.intake_encryption import encrypt_intake_call
 from app.workflows.consent import (
     ConsentAction,
@@ -208,6 +213,10 @@ def _create_tts_provider(settings: Settings) -> StreamingTextToSpeechProvider:
     return SarvamStreamingTextToSpeech(settings)
 
 
+def _create_object_storage_provider(settings: Settings) -> ObjectStorageProvider:
+    return GoogleCloudStorageProvider.from_settings(settings)
+
+
 def _speaker_for_language(settings: Settings, language: LanguageChoice) -> str:
     return {
         LanguageChoice.ENGLISH: settings.sarvam_tts_speaker,
@@ -311,6 +320,24 @@ async def _update_voicebot_intake_call(
         logger.warning("voicebot_intake_update_not_matched")
 
 
+async def _attach_voicebot_recording_artifact(
+    collection,
+    session_token_hash: str,
+    artifact: ProtectedObjectReference,
+) -> bool:
+    result = await collection.update_one(
+        {"voicebot_session_token_hash": session_token_hash},
+        {
+            "$push": {"intake.artifacts": artifact.model_dump(mode="json")},
+            "$set": {"updated_at": datetime.now(UTC)},
+        },
+    )
+    if result.matched_count != 1:
+        logger.warning("voicebot_recording_artifact_not_matched")
+        return False
+    return True
+
+
 @router.get("/exotel/passthru", status_code=status.HTTP_200_OK)
 async def exotel_passthru(
     request: Request,
@@ -363,7 +390,7 @@ async def exotel_voicebot_stream(
     intake_collection=Depends(get_intake_calls_collection),
     audit_collection=Depends(get_intake_audit_events_collection),
 ) -> None:
-    """Accept Exotel Voicebot messages without retaining or logging media payloads."""
+    """Accept Exotel Voicebot messages and retain audio only after consent."""
     session_token_from_auth = _voicebot_session_token_from_auth(websocket, settings)
     if session_token_from_auth is None:
         logger.warning("exotel_voicebot_authentication_rejected")
@@ -388,6 +415,9 @@ async def exotel_voicebot_stream(
     consent_workflow = ConsentWorkflow()
     speech_lock = Lock()
     selected_dialogue: ConsentDialogue | None = None
+    recording_provider: ObjectStorageProvider | None = None
+    recorder: ConsentGatedCallRecorder | None = None
+    recording_finalized = False
 
     async def speak(
         text: str,
@@ -400,6 +430,8 @@ async def exotel_voicebot_stream(
             async for audio in tts_provider.stream(
                 text, language_code=language_code, speaker=speaker
             ):
+                if recorder:
+                    recorder.append_agent_audio(audio.content)
                 await websocket.send_json(
                     {
                         "event": "media",
@@ -409,7 +441,7 @@ async def exotel_voicebot_stream(
                 )
 
     async def on_transcript(event_type: str, transcript: str, language: str | None) -> None:
-        nonlocal selected_dialogue
+        nonlocal recording_provider, recorder, selected_dialogue
         logger.info(
             "sarvam_stt_transcript_received stream_sid=%s event=%s language=%s characters=%d",
             stream_sid,
@@ -515,6 +547,26 @@ async def exotel_voicebot_stream(
                     event_type=IntakeAuditEventType.CONSENT_RECORDED,
                     details={"intake_consent": consent_value},
                 )
+            if (
+                action == ConsentAction.CONSENT_GRANTED
+                and settings.object_storage_provider == "gcs"
+            ):
+                try:
+                    recording_provider = _create_object_storage_provider(settings)
+                    recorder = ConsentGatedCallRecorder(settings.sarvam_stt_sample_rate)
+                    await _update_voicebot_intake_call(
+                        intake_collection,
+                        session_token_hash,
+                        **{"disclosures.recording_started_at": datetime.now(UTC)},
+                    )
+                    await _record_voicebot_session_event(
+                        collection, stream_sid, "voicebot_recording_started"
+                    )
+                except (OSError, ValueError):
+                    logger.exception("voicebot_recording_start_failed stream_sid=%s", stream_sid)
+                    await _record_voicebot_session_event(
+                        collection, stream_sid, "voicebot_recording_start_failed"
+                    )
         try:
             await speak(
                 response,
@@ -537,6 +589,51 @@ async def exotel_voicebot_stream(
         if language_workflow.begin() != LanguageSelectionAction.REQUEST_LANGUAGE:
             return
         await speak(LANGUAGE_SELECTION_PROMPT)
+
+    async def finalize_recording() -> None:
+        nonlocal recording_finalized
+        if recording_finalized or not recording_provider or not recorder:
+            return
+        recording_finalized = True
+        stored_any_track = False
+        for track in recorder.to_wav_tracks():
+            try:
+                stored_object = await recording_provider.store(
+                    intake_call_id,
+                    track.filename,
+                    track.content,
+                    "audio/wav",
+                )
+                artifact = ProtectedObjectReference(
+                    kind=ArtifactKind.CALL_RECORDING,
+                    storage_provider="gcs",
+                    storage_key=stored_object.key,
+                    content_type=stored_object.content_type,
+                )
+                if await _attach_voicebot_recording_artifact(
+                    intake_collection, session_token_hash, artifact
+                ):
+                    stored_any_track = True
+                    await record_audit_event(
+                        audit_collection,
+                        intake_call_id=intake_call_id,
+                        event_type=IntakeAuditEventType.ARTIFACT_ATTACHED,
+                        details={"artifact_kind": artifact.kind.value},
+                    )
+                    await _record_voicebot_session_event(
+                        collection, stream_sid, "voicebot_recording_stored", track=track.filename
+                    )
+            except (OSError, ValueError):
+                logger.exception("voicebot_recording_store_failed stream_sid=%s", stream_sid)
+                await _record_voicebot_session_event(
+                    collection, stream_sid, "voicebot_recording_store_failed", track=track.filename
+                )
+        if stored_any_track:
+            await _update_voicebot_intake_call(
+                intake_collection,
+                session_token_hash,
+                **{"disclosures.recording_stopped_at": datetime.now(UTC)},
+            )
 
     try:
         while True:
@@ -566,15 +663,21 @@ async def exotel_voicebot_stream(
                     return
             elif (
                 event_type == "media"
-                and stt_session
-                and (
-                    language_workflow.state == LanguageSelectionState.AWAITING_SELECTION
-                    or consent_workflow.state == ConsentState.AWAITING_CONSENT
-                )
             ):
                 payload = message.get("media", {}).get("payload")
                 if isinstance(payload, str) and payload:
-                    await stt_session.send_audio(payload)
+                    if recorder:
+                        try:
+                            recorder.append_caller_payload(payload)
+                        except ValueError:
+                            logger.warning(
+                                "voicebot_recording_invalid_audio stream_sid=%s", stream_sid
+                            )
+                    if stt_session and (
+                        language_workflow.state == LanguageSelectionState.AWAITING_SELECTION
+                        or consent_workflow.state == ConsentState.AWAITING_CONSENT
+                    ):
+                        await stt_session.send_audio(payload)
             elif event_type == "stop":
                 logger.info("exotel_voicebot_stream_stopped stream_sid=%s", stream_sid)
                 await _record_voicebot_session_event(
@@ -582,6 +685,7 @@ async def exotel_voicebot_stream(
                 )
                 if stt_session:
                     await stt_session.stop()
+                await finalize_recording()
                 await websocket.close()
                 return
     except WebSocketDisconnect:
@@ -590,6 +694,7 @@ async def exotel_voicebot_stream(
     finally:
         if stt_session:
             await stt_session.stop()
+        await finalize_recording()
 
 
 @router.api_route("/exotel/status", methods=["GET", "POST"], status_code=status.HTTP_200_OK)

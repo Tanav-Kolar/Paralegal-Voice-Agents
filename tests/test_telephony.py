@@ -1,5 +1,7 @@
 from base64 import b64encode
+from io import BytesIO
 from urllib.parse import urlsplit
+from wave import open as wave_open
 
 import pytest
 from cryptography.fernet import Fernet
@@ -14,7 +16,7 @@ from app.db.mongodb import (
     get_intake_calls_collection,
 )
 from app.main import create_app
-from app.providers.contracts import TranscriptHandler
+from app.providers.contracts import StoredObject, TranscriptHandler
 from app.security.field_encryption import FieldEncryptor, get_field_encryptor
 from app.workflows.consent import (
     ENGLISH_CONSENT_GRANTED_RESPONSE,
@@ -65,6 +67,8 @@ class FakeIntakeCallsCollection:
             return FakeUpdateResult(upserted_id="inserted")
         for key, value in update.get("$set", {}).items():
             _set_nested_value(document, key, value)
+        for key, value in update.get("$push", {}).items():
+            _append_nested_value(document, key, value)
         return FakeUpdateResult(upserted_id=None, matched_count=1)
 
     async def find_one(self, filter: dict, projection: dict | None = None) -> dict | None:
@@ -103,6 +107,14 @@ def _set_nested_value(document: dict, key: str, value: object) -> None:
     for part in parts[:-1]:
         target = target.setdefault(part, {})
     target[parts[-1]] = value
+
+
+def _append_nested_value(document: dict, key: str, value: object) -> None:
+    parts = key.split(".")
+    target = document
+    for part in parts[:-1]:
+        target = target.setdefault(part, {})
+    target.setdefault(parts[-1], []).append(value)
 
 
 class FakeStreamingSpeechToTextSession:
@@ -146,7 +158,23 @@ class FakeStreamingTextToSpeechProvider:
         yield SpeechAudio(content=b"prompt-audio", content_type="audio/L16")
 
 
-def make_client() -> tuple[
+class FakeObjectStorageProvider:
+    def __init__(self) -> None:
+        self.stored: list[tuple[object, str, bytes, str]] = []
+
+    async def store(self, intake_call_id, filename: str, content: bytes, content_type: str):
+        self.stored.append((intake_call_id, filename, content, content_type))
+        return StoredObject(
+            key=f"intake-calls/{intake_call_id}/{filename}", content_type=content_type
+        )
+
+    async def create_download_url(self, key: str) -> str:
+        return f"https://storage.example.test/{key}"
+
+
+def make_client(
+    *, object_storage_provider: str = "unconfigured"
+) -> tuple[
     TestClient,
     FakeCollection,
     list[FakeStreamingSpeechToTextSession],
@@ -169,6 +197,8 @@ def make_client() -> tuple[
         exotel_voicebot_username=VOICEBOT_USERNAME,
         exotel_voicebot_password=VOICEBOT_PASSWORD,
         sarvam_api_key="test-sarvam-api-key",
+        object_storage_provider=object_storage_provider,
+        gcs_bucket_name="demo-private-bucket" if object_storage_provider == "gcs" else "",
     )
 
     def create_fake_stt_session(
@@ -447,6 +477,62 @@ def test_exotel_voicebot_stream_routes_final_consent_to_tts_response() -> None:
     assert [event["event_type"] for event in events.audit_events.documents] == [
         "intake_created",
         "consent_recorded",
+    ]
+
+
+def test_exotel_voicebot_stream_stores_only_post_consent_audio_in_gcs(monkeypatch) -> None:
+    from app.api.routes import telephony
+
+    storage_provider = FakeObjectStorageProvider()
+    monkeypatch.setattr(
+        telephony, "_create_object_storage_provider", lambda settings: storage_provider
+    )
+    client, events, stt_sessions, _ = make_client(object_storage_provider="gcs")
+    credentials = b64encode(f"{VOICEBOT_USERNAME}:{VOICEBOT_PASSWORD}".encode()).decode()
+
+    with client:
+        stream_path = resolve_voicebot_stream_path(client, "sid-recording")
+        with client.websocket_connect(
+            stream_path,
+            headers={"Authorization": f"Basic {credentials}"},
+        ) as websocket:
+            websocket.send_json({"event": "start", "start": {"stream_sid": "stream-recording"}})
+            websocket.receive_json()
+            stt_sessions[0].transcript_on_next_audio = ("transcript.final", "English", "en-IN")
+            websocket.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
+            websocket.receive_json()
+            stt_sessions[0].transcript_on_next_audio = (
+                "transcript.final",
+                "Yes, I consent.",
+                "en-IN",
+            )
+            websocket.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
+            websocket.receive_json()
+            websocket.send_json(
+                {"event": "media", "media": {"payload": "Y2FsbGVyLXBvc3QtY29uc2VudCE="}}
+            )
+            websocket.send_json({"event": "stop"})
+
+    assert [item[1] for item in storage_provider.stored] == [
+        "recording-caller.wav",
+        "recording-agent.wav",
+    ]
+    caller_wav = storage_provider.stored[0][2]
+    with wave_open(BytesIO(caller_wav), "rb") as wav_file:
+        assert wav_file.readframes(wav_file.getnframes()) == b"caller-post-consent!"
+    intake_call = events.intake_calls.documents[0]
+    artifacts = intake_call["intake"]["artifacts"]
+    assert [artifact["storage_key"] for artifact in artifacts] == [
+        f"intake-calls/{intake_call['id']}/recording-caller.wav",
+        f"intake-calls/{intake_call['id']}/recording-agent.wav",
+    ]
+    assert intake_call["disclosures"]["recording_started_at"] is not None
+    assert intake_call["disclosures"]["recording_stopped_at"] is not None
+    assert [event["event_type"] for event in events.audit_events.documents] == [
+        "intake_created",
+        "consent_recorded",
+        "artifact_attached",
+        "artifact_attached",
     ]
 
 

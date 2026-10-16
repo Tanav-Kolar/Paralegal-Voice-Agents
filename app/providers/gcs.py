@@ -32,17 +32,16 @@ class GoogleCloudStorageProvider:
             )
         if not settings.gcs_bucket_name:
             raise ValueError("GCS bucket name is not configured")
-        if not settings.gcs_service_account_key_path:
-            raise ValueError("GCS service-account key path is not configured")
-
-        credentials_path = Path(settings.gcs_service_account_key_path)
-        if not credentials_path.is_file():
-            raise ValueError("GCS service-account key file was not found")
-
-        client = storage.Client.from_service_account_json(
-            str(credentials_path),
-            project=settings.gcs_project_id or None,
-        )
+        if settings.gcs_service_account_key_path:
+            credentials_path = Path(settings.gcs_service_account_key_path)
+            if not credentials_path.is_file():
+                raise ValueError("GCS service-account key file was not found")
+            client = storage.Client.from_service_account_json(
+                str(credentials_path),
+                project=settings.gcs_project_id or None,
+            )
+        else:
+            client = storage.Client(project=settings.gcs_project_id or None)
         return cls(
             bucket_name=settings.gcs_bucket_name,
             signed_url_ttl_minutes=settings.gcs_signed_url_ttl_minutes,

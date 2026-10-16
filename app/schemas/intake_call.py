@@ -68,6 +68,8 @@ class DisclosureDetails(BaseModel):
     recording_disclosure_given_at: datetime | None = None
     recording_consent: bool | None = None
     recording_consent_at: datetime | None = None
+    recording_started_at: datetime | None = None
+    recording_stopped_at: datetime | None = None
     intake_consent: bool | None = None
     intake_consent_at: datetime | None = None
     no_advice_disclosure_given_at: datetime | None = None
