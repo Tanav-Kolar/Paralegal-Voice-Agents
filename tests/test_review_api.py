@@ -3,7 +3,7 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from app.api.routes import review_ui
+from app.api.routes import review_api
 from app.core.config import Settings, get_settings
 from app.db.mongodb import get_intake_calls_collection
 from app.main import create_app
@@ -49,7 +49,7 @@ def make_client(*, app_env: str = "development") -> TestClient:
     settings = Settings(
         _env_file=None,
         app_env=app_env,
-        local_review_ui_enabled=True,
+        local_review_api_enabled=True,
         object_storage_provider="gcs",
         gcs_bucket_name="demo-private-bucket",
     )
@@ -95,17 +95,12 @@ def make_client(*, app_env: str = "development") -> TestClient:
     return TestClient(app)
 
 
-def test_local_review_ui_lists_masked_calls_newest_first(monkeypatch) -> None:
-    monkeypatch.setattr(review_ui, "_create_object_storage_provider", lambda settings: FakeStorageProvider())
+def test_local_review_api_lists_masked_calls_newest_first() -> None:
     client = make_client()
 
     with client:
-        page = client.get("/review")
         response = client.get("/api/v1/review/intake-calls")
 
-    assert page.status_code == 200
-    assert "Voice Intake Review" in page.text
-    assert "+91******1234" not in page.text
     assert response.status_code == 200
     calls = response.json()
     assert [call["status"] for call in calls] == ["in_progress", "completed"]
@@ -113,8 +108,12 @@ def test_local_review_ui_lists_masked_calls_newest_first(monkeypatch) -> None:
     assert calls[1]["recordings"] == [{"index": 0, "label": "Caller"}]
 
 
-def test_local_review_ui_redirects_to_signed_recording_url(monkeypatch) -> None:
-    monkeypatch.setattr(review_ui, "_create_object_storage_provider", lambda settings: FakeStorageProvider())
+def test_local_review_api_redirects_to_signed_recording_url(monkeypatch) -> None:
+    monkeypatch.setattr(
+        review_api,
+        "_create_object_storage_provider",
+        lambda settings: FakeStorageProvider(),
+    )
     client = make_client()
 
     with client:
@@ -128,10 +127,10 @@ def test_local_review_ui_redirects_to_signed_recording_url(monkeypatch) -> None:
     assert response.headers["location"].startswith("https://storage.example.test/intake-calls/")
 
 
-def test_local_review_ui_is_unavailable_in_production() -> None:
+def test_local_review_api_is_unavailable_in_production() -> None:
     client = make_client(app_env="production")
 
     with client:
-        response = client.get("/review")
+        response = client.get("/api/v1/review/intake-calls")
 
     assert response.status_code == 404
