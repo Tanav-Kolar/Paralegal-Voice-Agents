@@ -38,6 +38,7 @@ def test_create_intake_call_keeps_artifact_as_private_reference() -> None:
             "started_at": "2026-10-15T10:00:00Z",
         },
         "disclosures": {
+            "recording_consent": True,
             "intake_consent": True,
             "intake_consent_at": "2026-10-15T10:00:15Z",
         },
@@ -93,6 +94,30 @@ def test_create_intake_call_keeps_artifact_as_private_reference() -> None:
     assert "+919999999999" not in str(audit_collection.documents)
     assert "Asha Sharma" not in str(audit_collection.documents)
     assert "recording.wav" not in str(audit_collection.documents)
+
+
+def test_create_intake_call_rejects_case_facts_without_both_consents() -> None:
+    app = create_app()
+    collection = FakeIntakeCallsCollection()
+    app.dependency_overrides[get_intake_calls_collection] = lambda: collection
+    app.dependency_overrides[get_intake_audit_events_collection] = FakeAuditEventsCollection
+    app.dependency_overrides[get_field_encryptor] = lambda: FieldEncryptor(
+        Fernet.generate_key().decode()
+    )
+    payload = {
+        "telephony": {
+            "provider": "exotel",
+            "provider_call_id": "call-unconsented",
+            "caller_phone": "+919999999999",
+            "started_at": "2026-10-15T10:00:00Z",
+        },
+        "disclosures": {"intake_consent": True},
+        "intake": {"facts": [{"field_name": "example", "value": "private"}]},
+    }
+    with TestClient(app) as client:
+        response = client.post("/api/v1/intake-calls", json=payload)
+    assert response.status_code == 422
+    assert collection.documents == []
 
 
 def test_create_intake_call_rejects_non_private_storage_reference() -> None:
