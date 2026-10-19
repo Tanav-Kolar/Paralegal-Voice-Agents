@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     speech_to_text_provider: str = "sarvam"
     text_to_speech_provider: str = "sarvam"
     sarvam_api_key: str = ""
+    sarvam_chat_model: str = "sarvam-105b-conversations"
+    sarvam_chat_timeout_seconds: float = Field(default=15, gt=0, le=60)
     sarvam_stt_language_code: str = "auto"
     sarvam_stt_model: str = "saaras:v3-realtime"
     sarvam_stt_stream_type: str = "fast"

@@ -17,7 +17,6 @@ from app.db.mongodb import (
 )
 from app.main import create_app
 from app.providers.contracts import StoredObject, TranscriptHandler
-from app.schemas.intake_call import LanguageChoice
 from app.security.field_encryption import FieldEncryptor, get_field_encryptor
 from app.workflows.consent import (
     ENGLISH_CONSENT_GRANTED_RESPONSE,
@@ -26,7 +25,7 @@ from app.workflows.consent import (
     ENGLISH_CONSENT_UNCLEAR_CLOSURE,
     HINDI_CONSENT_DIALOGUE,
 )
-from app.workflows.details import DetailWorkflow
+from app.workflows.conversation import ConversationReply, ConversationUnavailable
 
 WEBHOOK_TOKEN = "test-webhook-token"
 VOICEBOT_USERNAME = "test-voicebot"
@@ -174,6 +173,20 @@ class FakeObjectStorageProvider:
         return f"https://storage.example.test/{key}"
 
 
+class FakeConversationProvider:
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def reply(self, messages):
+        self.requests.append(messages)
+        is_hindi = "Speak in Hindi" in messages[0]["content"]
+        finished = messages[-1]["content"].lower() in {"nothing", "nothing else"}
+        reply = ("धन्यवाद।" if is_hindi else "Thank you.") if finished else (
+            "कृपया और बताएं।" if is_hindi else "Please tell me more."
+        )
+        return ConversationReply(reply=reply, finished=finished)
+
+
 def make_client(
     *, object_storage_provider: str = "unconfigured"
 ) -> tuple[
@@ -192,6 +205,8 @@ def make_client(
     events.audit_events = audit_events
     stt_sessions: list[FakeStreamingSpeechToTextSession] = []
     tts_providers: list[FakeStreamingTextToSpeechProvider] = []
+    conversation_provider = FakeConversationProvider()
+    events.conversation_provider = conversation_provider
     settings = Settings(
         _env_file=None,
         exotel_webhook_token=WEBHOOK_TOKEN,
@@ -226,6 +241,7 @@ def make_client(
     app.dependency_overrides[get_field_encryptor] = lambda: encryptor
     telephony._create_stt_session = create_fake_stt_session
     telephony._create_tts_provider = create_fake_tts_provider
+    telephony._create_conversation_provider = lambda settings: conversation_provider
     return TestClient(app), events, stt_sessions, tts_providers
 
 
@@ -453,14 +469,13 @@ def test_exotel_voicebot_stream_routes_final_consent_to_tts_response() -> None:
             )
             websocket.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
             response_audio = websocket.receive_json()
+            websocket.receive_json()
             websocket.send_json({"event": "stop"})
 
     assert tts_providers[0].texts == [LANGUAGE_SELECTION_PROMPT]
     assert tts_providers[2].texts == [ENGLISH_CONSENT_PROMPT]
-    assert tts_providers[3].texts == [
-        f"{ENGLISH_CONSENT_GRANTED_RESPONSE} "
-        f"{DetailWorkflow(LanguageChoice.ENGLISH).begin()}"
-    ]
+    assert tts_providers[3].texts == [ENGLISH_CONSENT_GRANTED_RESPONSE]
+    assert tts_providers[4].texts == ["Please tell me more."]
     assert response_audio == {
         "event": "media",
         "stream_sid": "stream-consent-yes",
@@ -512,6 +527,7 @@ def test_exotel_voicebot_stream_stores_only_post_consent_audio_in_gcs(monkeypatc
                 "en-IN",
             )
             websocket.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
+            websocket.receive_json()
             websocket.receive_json()
             websocket.send_json(
                 {"event": "media", "media": {"payload": "Y2FsbGVyLXBvc3QtY29uc2VudCE="}}
@@ -628,7 +644,15 @@ def test_post_consent_mixed_language_details_are_encrypted_and_stored_once(
     turns = [
         ("Mera naam नमिता hai", "hi-IN"),
         ("दिल्ली, near Saket", "hi-IN"),
-        ("15 March 2024", "en-IN"),
+        ("राहुल", "hi-IN"),
+        ("No urgent deadlines", "en-IN"),
+        ("तलाक", "hi-IN"),
+        ("15 March 2024 ko separation hua", "hi-IN"),
+        ("Marriage 2018 mein hui", "hi-IN"),
+        ("We live separately", "en-IN"),
+        ("Mujhe process samajhna hai", "hi-IN"),
+        ("No cases", "en-IN"),
+        ("Nothing else", "en-IN"),
     ]
     with client:
         path = resolve_voicebot_stream_path(client, "mixed-language")
@@ -638,31 +662,29 @@ def test_post_consent_mixed_language_details_are_encrypted_and_stored_once(
             ws.send_json({"event": "start", "start": {"stream_sid": "mixed-stream"}})
             ws.receive_json()
             ws.receive_json()
-            for utterance, detected in [(chosen, "en-IN"), ("haan", "hi-IN"), *turns]:
+            for index, (utterance, detected) in enumerate(
+                [(chosen, "en-IN"), ("haan", "hi-IN"), *turns]
+            ):
                 stt_sessions[0].transcript_on_next_audio = ("transcript.final", utterance, detected)
                 ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
                 ws.receive_json()
+                if index == 1:
+                    ws.receive_json()
             ws.send_json({"event": "stop"})
 
     intake = events.intake_calls.documents[0]["intake"]
-    segments = intake["transcript_segments"]
+    assert events.intake_calls.documents[0]["status"] == "completed"
+    segments = [s for s in intake["transcript_segments"] if s["speaker"] == "caller"]
+    agent_segments = [s for s in intake["transcript_segments"] if s["speaker"] == "agent"]
     assert [events.encryptor.decrypt(s["text_encrypted"]) for s in segments] == [
         text for text, _ in turns
     ]
     assert [s["detected_language"] for s in segments] == [language for _, language in turns]
     assert "Mera naam" not in str(intake)
-    facts = intake["facts"]
-    assert [f["field_name"] for f in facts] == [
-        "caller_name_as_stated",
-        "location_as_stated",
-        "relevant_date_as_stated",
-    ]
-    assert [events.encryptor.decrypt(f["value_encrypted"]) for f in facts] == [
-        turns[0][0],
-        turns[1][0],
-        turns[2][0],
-    ]
-    assert facts[1]["source_transcript_segment_ids"] == [segments[1]["id"]]
+    assert intake["facts"] == []
+    assert len(agent_segments) == len(turns) + 2
+    assert all(s["detected_language"] == expected_code for s in agent_segments)
+    assert all(s["text_encrypted"].startswith("fernet:v1:") for s in agent_segments)
     assert all(p.requests == [(expected_code, expected_speaker)] for p in tts_providers[2:])
 
 
@@ -686,3 +708,65 @@ def test_declined_consent_does_not_collect_post_consent_details() -> None:
     assert len(stt_sessions[0].audio_payloads) == 2
     assert events.intake_calls.documents[0]["intake"]["transcript_segments"] == []
     assert events.intake_calls.documents[0]["intake"]["facts"] == []
+    assert events.conversation_provider.requests == []
+
+
+def test_general_intake_preserves_answers_without_inventing_facts() -> None:
+    client, events, stt_sessions, _ = make_client()
+    credentials = b64encode(f"{VOICEBOT_USERNAME}:{VOICEBOT_PASSWORD}".encode()).decode()
+    turns = ["skip", "Delhi", "pata nahi", "no", "custody", "2024", "no", "nothing"]
+    with client:
+        path = resolve_voicebot_stream_path(client, "general-intake")
+        with client.websocket_connect(
+            path, headers={"Authorization": f"Basic {credentials}"}
+        ) as ws:
+            ws.send_json({"event": "start", "start": {"stream_sid": "general-stream"}})
+            ws.receive_json()
+            ws.receive_json()
+            for index, utterance in enumerate(["हिंदी", "yes", *turns]):
+                stt_sessions[0].transcript_on_next_audio = ("transcript.final", utterance, "hi-IN")
+                ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
+                ws.receive_json()
+                if index == 1:
+                    ws.receive_json()
+            ws.send_json({"event": "stop"})
+    call = events.intake_calls.documents[0]
+    assert call["status"] == "completed"
+    assert call["intake"]["matter_type"] is None
+    assert call["intake"]["facts"] == []
+    segments = [s for s in call["intake"]["transcript_segments"] if s["speaker"] == "caller"]
+    assert [events.encryptor.decrypt(s["text_encrypted"]) for s in segments] == turns
+
+
+def test_conversation_provider_failure_stops_intake_and_keeps_previous_transcript() -> None:
+    client, events, stt_sessions, _ = make_client()
+    provider = events.conversation_provider
+    original_reply = provider.reply
+
+    async def fail_after_first_reply(messages):
+        if provider.requests:
+            raise ConversationUnavailable("unavailable")
+        return await original_reply(messages)
+
+    provider.reply = fail_after_first_reply
+    credentials = b64encode(f"{VOICEBOT_USERNAME}:{VOICEBOT_PASSWORD}".encode()).decode()
+    with client:
+        path = resolve_voicebot_stream_path(client, "model-failure")
+        with client.websocket_connect(
+            path, headers={"Authorization": f"Basic {credentials}"}
+        ) as ws:
+            ws.send_json({"event": "start", "start": {"stream_sid": "model-failure-stream"}})
+            ws.receive_json()
+            ws.receive_json()
+            for index, utterance in enumerate(["English", "yes", "A private response"]):
+                stt_sessions[0].transcript_on_next_audio = ("transcript.final", utterance, "en-IN")
+                ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
+                ws.receive_json()
+                if index == 1:
+                    ws.receive_json()
+            ws.send_json({"event": "stop"})
+    call = events.intake_calls.documents[0]
+    assert call["status"] == "abandoned"
+    caller_segments = [s for s in call["intake"]["transcript_segments"] if s["speaker"] == "caller"]
+    assert events.encryptor.decrypt(caller_segments[0]["text_encrypted"]) == "A private response"
+    assert any(e["event_type"] == "voicebot_conversation_unavailable" for e in events.documents)

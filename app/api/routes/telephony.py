@@ -35,11 +35,11 @@ from app.providers.contracts import (
 )
 from app.providers.gcs import GoogleCloudStorageProvider
 from app.providers.sarvam import SarvamRealtimeSpeechToTextSession, SarvamStreamingTextToSpeech
+from app.providers.sarvam_chat import SarvamConversationProvider
 from app.schemas.audit_event import IntakeAuditEventType
 from app.schemas.intake_call import (
     ArtifactKind,
     CallStatus,
-    CaseFact,
     IntakeCallCreateRequest,
     LanguageChoice,
     ProtectedObjectReference,
@@ -58,7 +58,11 @@ from app.workflows.consent import (
     ConsentWorkflow,
     get_consent_dialogue,
 )
-from app.workflows.details import DetailState, DetailWorkflow
+from app.workflows.conversation import (
+    ConversationProvider,
+    ConversationUnavailable,
+    ConversationWorkflow,
+)
 from app.workflows.language import (
     LanguageSelectionAction,
     LanguageSelectionState,
@@ -84,6 +88,12 @@ LANGUAGE_SELECTION_UNCLEAR_CLOSURE = (
 HINDI_LANGUAGE_SELECTION_UNCLEAR_CLOSURE = (
     "मैं आपकी भाषा की पुष्टि नहीं कर सकी, इसलिए मामले की जानकारी नहीं लूँगी। धन्यवाद। नमस्ते।"
 )
+CONVERSATION_UNAVAILABLE = {
+    LanguageChoice.ENGLISH: (
+        "I am unable to continue the intake right now. Thank you for calling. Goodbye."
+    ),
+    LanguageChoice.HINDI: "मैं अभी इंटेक आगे नहीं बढ़ा सकती। कॉल करने के लिए धन्यवाद। नमस्ते।",
+}
 
 # Exotel status fields we keep. Caller/callee numbers (From/To) are deliberately excluded.
 STATUS_FIELDS = {
@@ -221,6 +231,10 @@ def _create_tts_provider(settings: Settings) -> StreamingTextToSpeechProvider:
     if settings.text_to_speech_provider != "sarvam":
         raise ValueError("Sarvam must be configured as the text-to-speech provider")
     return SarvamStreamingTextToSpeech(settings)
+
+
+def _create_conversation_provider(settings: Settings) -> ConversationProvider:
+    return SarvamConversationProvider(settings)
 
 
 def _create_object_storage_provider(settings: Settings) -> ObjectStorageProvider:
@@ -429,7 +443,7 @@ async def exotel_voicebot_stream(
     recording_provider: ObjectStorageProvider | None = None
     recorder: ConsentGatedCallRecorder | None = None
     recording_finalized = False
-    detail_workflow: DetailWorkflow | None = None
+    conversation: ConversationWorkflow | None = None
     stream_started_at = monotonic()
 
     async def speak(
@@ -452,9 +466,33 @@ async def exotel_voicebot_stream(
                         "media": {"payload": b64encode(audio.content).decode()},
                     }
                 )
+            if consent_workflow.state == ConsentState.GRANTED and conversation:
+                received_ms = max(0, int((monotonic() - stream_started_at) * 1000))
+                agent_segment = TranscriptSegment(
+                    speaker=TranscriptSpeaker.AGENT,
+                    text_encrypted=encryptor.encrypt(text),
+                    started_at_ms=received_ms,
+                    ended_at_ms=received_ms,
+                    detected_language=language_code,
+                )
+                result = await intake_collection.update_one(
+                    {
+                        "voicebot_session_token_hash": session_token_hash,
+                        "disclosures.recording_consent": True,
+                        "disclosures.intake_consent": True,
+                    },
+                    {
+                        "$push": {
+                            "intake.transcript_segments": agent_segment.model_dump(mode="json")
+                        },
+                        "$set": {"updated_at": datetime.now(UTC)},
+                    },
+                )
+                if result.matched_count != 1:
+                    raise RuntimeError("Could not save the consented agent transcript")
 
     async def on_transcript(event_type: str, transcript: str, language: str | None) -> None:
-        nonlocal detail_workflow, recording_provider, recorder, selected_dialogue
+        nonlocal conversation, recording_provider, recorder, selected_dialogue
         logger.info(
             "sarvam_stt_transcript_received stream_sid=%s event=%s language=%s characters=%d",
             stream_sid,
@@ -527,8 +565,8 @@ async def exotel_voicebot_stream(
                 speaker=_speaker_for_language(settings, selected_language),
             )
             return
-        if consent_workflow.state == ConsentState.GRANTED and detail_workflow:
-            if detail_workflow.state == DetailState.COMPLETE:
+        if consent_workflow.state == ConsentState.GRANTED and conversation:
+            if conversation.finished:
                 return
             # Sarvam's current callback has no segment timing or confidence. Record the
             # receipt time instead of inventing a speech duration or confidence score.
@@ -555,33 +593,31 @@ async def exotel_voicebot_stream(
                 logger.error("voicebot_transcript_consent_or_session_not_matched")
                 await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
                 return
-            detail_result = detail_workflow.handle_response(transcript, str(segment.id))
-            if detail_result.field and detail_result.value and detail_result.source_segment_id:
-                fact = CaseFact(
-                    field_name=detail_result.field,
-                    value_encrypted=encryptor.encrypt(detail_result.value),
-                    source_transcript_segment_ids=[UUID(detail_result.source_segment_id)],
+            try:
+                conversation_reply = await conversation.handle_response(transcript)
+            except ConversationUnavailable:
+                conversation.finished = True
+                await _record_voicebot_session_event(
+                    collection, stream_sid, "voicebot_conversation_unavailable"
                 )
-                result = await intake_collection.update_one(
-                    {
-                        "voicebot_session_token_hash": session_token_hash,
-                        "disclosures.recording_consent": True,
-                        "disclosures.intake_consent": True,
-                    },
-                    {
-                        "$push": {"intake.facts": fact.model_dump(mode="json")},
-                        "$set": {"updated_at": datetime.now(UTC)},
-                    },
+                await _update_voicebot_intake_call(
+                    intake_collection, session_token_hash, status=CallStatus.ABANDONED.value
                 )
-                if result.matched_count != 1:
-                    logger.error("voicebot_fact_consent_or_session_not_matched")
-                    await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
-                    return
+                await speak(
+                    CONVERSATION_UNAVAILABLE[conversation.language],
+                    language_code=selected_dialogue.language_code,
+                    speaker=_speaker_for_language(settings, conversation.language),
+                )
+                return
             await speak(
-                detail_result.prompt,
+                conversation_reply.reply,
                 language_code=selected_dialogue.language_code,
-                speaker=_speaker_for_language(settings, detail_workflow.language),
+                speaker=_speaker_for_language(settings, conversation.language),
             )
+            if conversation.finished:
+                await _update_voicebot_intake_call(
+                    intake_collection, session_token_hash, status=CallStatus.COMPLETED.value
+                )
             return
         if consent_workflow.state != ConsentState.AWAITING_CONSENT:
             logger.info(
@@ -656,8 +692,27 @@ async def exotel_voicebot_stream(
                     )
         try:
             if action == ConsentAction.CONSENT_GRANTED:
-                detail_workflow = DetailWorkflow(language_workflow.selected_language)
-                response = f"{response} {detail_workflow.begin()}"
+                try:
+                    conversation = ConversationWorkflow(
+                        language_workflow.selected_language, _create_conversation_provider(settings)
+                    )
+                    await speak(
+                        response,
+                        language_code=selected_dialogue.language_code,
+                        speaker=_speaker_for_language(settings, conversation.language),
+                    )
+                    first_reply = await conversation.begin()
+                    response = first_reply.reply
+                except ConversationUnavailable:
+                    if conversation:
+                        conversation.finished = True
+                    await _record_voicebot_session_event(
+                        collection, stream_sid, "voicebot_conversation_unavailable"
+                    )
+                    await _update_voicebot_intake_call(
+                        intake_collection, session_token_hash, status=CallStatus.ABANDONED.value
+                    )
+                    response = CONVERSATION_UNAVAILABLE[language_workflow.selected_language]
             await speak(
                 response,
                 language_code=selected_dialogue.language_code,
@@ -773,8 +828,8 @@ async def exotel_voicebot_stream(
                         or consent_workflow.state == ConsentState.AWAITING_CONSENT
                         or (
                             consent_workflow.state == ConsentState.GRANTED
-                            and detail_workflow is not None
-                            and detail_workflow.state != DetailState.COMPLETE
+                            and conversation is not None
+                            and not conversation.finished
                         )
                     ):
                         await stt_session.send_audio(payload)
