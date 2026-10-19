@@ -71,3 +71,10 @@ Run backend checks from `backend/` with:
 ruff check . ../tests
 pytest
 ```
+
+## CI and deployment
+
+GitHub Actions runs backend and frontend checks for pull requests and pushes to
+`main`. After checks pass on `main`, it builds the backend image and updates the
+existing Cloud Run service. See [CI/CD setup](CICD.md) for authentication,
+activation, and troubleshooting.
