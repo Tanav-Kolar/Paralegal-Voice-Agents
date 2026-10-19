@@ -14,8 +14,20 @@ FastAPI foundation for an AI-assisted, consent-first family-law lead-intake serv
 
 ## Local setup
 
-1. Use Python 3.11 or newer.
-2. Create a virtual environment and activate it.
+The backend lives in `backend/`; the local review UI lives in `front-end/`.
+
+1. Use Python 3.11 or newer and change into the backend directory:
+
+   ```bash
+   cd backend
+   ```
+
+2. Create a virtual environment and activate it:
+
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   ```
 3. Install the project with development dependencies:
 
    ```bash
@@ -31,7 +43,7 @@ FastAPI foundation for an AI-assisted, consent-first family-law lead-intake serv
 
 ## Optional local MongoDB
 
-MongoDB Atlas is the supported database for the MVP and demo. The Docker Compose service remains available for future local development without Atlas access.
+MongoDB Atlas is the supported database for the MVP and demo. The Docker Compose service in `backend/` remains available for future local development without Atlas access. Run the following commands from `backend/`.
 
 1. Set `MONGODB_URI` in `.env` to the local connection string from `.env.example`.
 2. Start MongoDB:
@@ -52,7 +64,7 @@ The API exposes:
 - `GET /api/v1/health/ready` for MongoDB readiness
 - `POST /api/v1/intake-calls` for creating the initial intake-call record
 
-Run checks with:
+Run backend checks from `backend/` with:
 
 ```bash
 ruff check .

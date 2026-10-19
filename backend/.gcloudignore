@@ -1,0 +1,14 @@
+.gcloudignore
+.git
+.env
+.env.*
+!.env.example
+secrets/
+.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+tests/
+.DS_Store

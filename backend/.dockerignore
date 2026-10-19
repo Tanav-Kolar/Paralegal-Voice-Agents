@@ -10,3 +10,5 @@ __pycache__
 *.py[cod]
 secrets
 tests
+.DS_Store
+.gcloudignore

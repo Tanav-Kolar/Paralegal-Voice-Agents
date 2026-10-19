@@ -5,11 +5,12 @@ in the private GCS bucket. It is deliberately separate from the deployed FastAPI
 
 ## Start the local backend
 
-1. In the repository root, set `LOCAL_REVIEW_API_ENABLED=true` in `.env`.
+1. In `backend/.env`, set `LOCAL_REVIEW_API_ENABLED=true`.
 2. Keep `APP_ENV=development` and configure the existing Atlas and GCS credentials in `.env`.
 3. Start the API:
 
    ```bash
+   cd backend
    .venv/bin/uvicorn app.main:app --reload --no-access-log
    ```
 
@@ -18,10 +19,13 @@ The API remains unavailable when `APP_ENV=production`, even if the flag is set.
 ## Start the front-end
 
 ```bash
-cd front-end
+cd ../front-end
 bun install
 bun dev
 ```
+
+The `cd` command above assumes the current directory is `backend/`; use `cd front-end`
+from the repository root instead.
 
 Open the local URL printed by Vite, normally `http://127.0.0.1:5173`.
 
