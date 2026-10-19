@@ -14,7 +14,8 @@ FastAPI foundation for an AI-assisted, consent-first family-law lead-intake serv
 
 ## Local setup
 
-The backend lives in `backend/`; the local review UI lives in `front-end/`.
+The backend lives in `backend/`, the local review UI lives in `front-end/`, and
+the backend tests live in the root `tests/` directory.
 
 1. Use Python 3.11 or newer and change into the backend directory:
 
@@ -67,6 +68,6 @@ The API exposes:
 Run backend checks from `backend/` with:
 
 ```bash
-ruff check .
+ruff check . ../tests
 pytest
 ```
