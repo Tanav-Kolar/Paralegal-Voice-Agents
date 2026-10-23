@@ -1,6 +1,6 @@
 import logging
 from asyncio import Lock
-from base64 import b64decode, b64encode
+from base64 import b64decode
 from binascii import Error as BinasciiError
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -51,6 +51,7 @@ from app.security.field_encryption import FieldEncryptor, get_field_encryptor
 from app.services.audit import record_audit_event, record_intake_creation_audit_events
 from app.services.call_recording import ConsentGatedCallRecorder
 from app.services.intake_encryption import encrypt_intake_call
+from app.voice.transport import Audio, ExotelTransport, Start, Stop
 from app.workflows.consent import (
     ConsentAction,
     ConsentDialogue,
@@ -446,17 +447,18 @@ async def run_voicebot_stream(
     encryptor: FieldEncryptor,
 ) -> None:
     """Run one consent-gated intake session for an already-authenticated stream token."""
+    transport = ExotelTransport(websocket)
     session_token_hash = _voicebot_session_token_hash(session_token)
     intake_call = await intake_collection.find_one(
         {"voicebot_session_token_hash": session_token_hash}, {"id": 1}
     )
     if not intake_call or not intake_call.get("id"):
         logger.warning("exotel_voicebot_session_rejected")
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        await transport.close(status.WS_1008_POLICY_VIOLATION)
         return
     intake_call_id = UUID(str(intake_call["id"]))
 
-    await websocket.accept()
+    await transport.accept()
     stream_sid: str | None = None
     stt_session: StreamingSpeechToTextSession | None = None
     language_workflow = LanguageSelectionWorkflow()
@@ -482,13 +484,7 @@ async def run_voicebot_stream(
             ):
                 if recorder:
                     recorder.append_agent_audio(audio.content)
-                await websocket.send_json(
-                    {
-                        "event": "media",
-                        "stream_sid": stream_sid,
-                        "media": {"payload": b64encode(audio.content).decode()},
-                    }
-                )
+                await transport.send_audio(audio.content)
             if consent_workflow.state == ConsentState.GRANTED and conversation:
                 received_ms = max(0, int((monotonic() - stream_started_at) * 1000))
                 agent_segment = TranscriptSegment(
@@ -614,7 +610,7 @@ async def run_voicebot_stream(
             )
             if result.matched_count != 1:
                 logger.error("voicebot_transcript_consent_or_session_not_matched")
-                await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+                await transport.close(status.WS_1011_INTERNAL_ERROR)
                 return
             try:
                 conversation_reply = await conversation.handle_response(transcript)
@@ -748,7 +744,7 @@ async def run_voicebot_stream(
             await _record_voicebot_session_event(
                 collection, stream_sid, "voicebot_tts_response_failed"
             )
-            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+            await transport.close(status.WS_1011_INTERNAL_ERROR)
             return
 
     async def speak_consent_prompt() -> None:
@@ -812,10 +808,9 @@ async def run_voicebot_stream(
 
     try:
         while True:
-            message = await websocket.receive_json()
-            event_type = message.get("event")
-            if event_type == "start":
-                stream_sid = message.get("start", {}).get("stream_sid")
+            event = await transport.recv()
+            if isinstance(event, Start):
+                stream_sid = event.stream_sid
                 logger.info("exotel_voicebot_stream_started stream_sid=%s", stream_sid)
                 await _record_voicebot_session_event(
                     collection, stream_sid, "voicebot_stream_started"
@@ -834,29 +829,26 @@ async def run_voicebot_stream(
                     await _record_voicebot_session_event(
                         collection, stream_sid, "voicebot_stt_start_failed"
                     )
-                    await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+                    await transport.close(status.WS_1011_INTERNAL_ERROR)
                     return
-            elif event_type == "media":
-                payload = message.get("media", {}).get("payload")
-                if isinstance(payload, str) and payload:
-                    if recorder:
-                        try:
-                            recorder.append_caller_payload(payload)
-                        except ValueError:
-                            logger.warning(
-                                "voicebot_recording_invalid_audio stream_sid=%s", stream_sid
-                            )
-                    if stt_session and (
-                        language_workflow.state == LanguageSelectionState.AWAITING_SELECTION
-                        or consent_workflow.state == ConsentState.AWAITING_CONSENT
-                        or (
-                            consent_workflow.state == ConsentState.GRANTED
-                            and conversation is not None
-                            and not conversation.finished
-                        )
-                    ):
-                        await stt_session.send_audio(payload)
-            elif event_type == "stop":
+            elif isinstance(event, Audio):
+                payload = event.payload
+                if recorder:
+                    try:
+                        recorder.append_caller_payload(payload)
+                    except ValueError:
+                        logger.warning("voicebot_recording_invalid_audio stream_sid=%s", stream_sid)
+                if stt_session and (
+                    language_workflow.state == LanguageSelectionState.AWAITING_SELECTION
+                    or consent_workflow.state == ConsentState.AWAITING_CONSENT
+                    or (
+                        consent_workflow.state == ConsentState.GRANTED
+                        and conversation is not None
+                        and not conversation.finished
+                    )
+                ):
+                    await stt_session.send_audio(payload)
+            elif isinstance(event, Stop):
                 logger.info("exotel_voicebot_stream_stopped stream_sid=%s", stream_sid)
                 await _record_voicebot_session_event(
                     collection, stream_sid, "voicebot_stream_stopped"
@@ -864,7 +856,7 @@ async def run_voicebot_stream(
                 if stt_session:
                     await stt_session.stop()
                 await finalize_recording()
-                await websocket.close()
+                await transport.close()
                 return
     except WebSocketDisconnect:
         logger.info("exotel_voicebot_stream_disconnected stream_sid=%s", stream_sid)
