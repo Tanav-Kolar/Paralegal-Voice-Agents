@@ -46,6 +46,10 @@ class Transport(Protocol):
 
     async def send_audio(self, pcm: bytes) -> None: ...
 
+    async def clear(self) -> None:
+        """Drop agent audio the far end has buffered but not yet played."""
+        ...
+
     async def close(self, code: int | None = None) -> None: ...
 
 
@@ -89,6 +93,9 @@ class ExotelTransport:
             }
         )
 
+    async def clear(self) -> None:
+        await self._websocket.send_json({"event": "clear", "stream_sid": self._stream_sid})
+
     async def close(self, code: int | None = None) -> None:
         if code is None:
             await self._websocket.close()
@@ -123,6 +130,9 @@ class BrowserTransport:
 
     async def send_audio(self, pcm: bytes) -> None:
         await self._websocket.send_bytes(pcm)
+
+    async def clear(self) -> None:
+        await self._websocket.send_text("clear")
 
     async def close(self, code: int | None = None) -> None:
         if code is None:

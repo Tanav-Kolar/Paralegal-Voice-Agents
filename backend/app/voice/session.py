@@ -1,5 +1,5 @@
+import asyncio
 import logging
-from asyncio import Lock
 from base64 import b64encode
 from collections.abc import Callable
 from contextlib import suppress
@@ -168,7 +168,15 @@ class Session:
         self.stt_session: StreamingSpeechToTextSession | None = None
         self.language_workflow = LanguageSelectionWorkflow()
         self.consent_workflow = ConsentWorkflow()
-        self.speech_lock = Lock()
+        self.speech_lock = asyncio.Lock()
+        # Turns (and the opening prompt, as None) run on a worker so the STT receiver and the
+        # media loop keep moving while the agent speaks; that is what makes barge-in possible.
+        self._turns: asyncio.Queue[tuple[str, str | None] | None] = asyncio.Queue()
+        self._worker: asyncio.Task | None = None
+        self._speech_task: asyncio.Task | None = None
+        self._turn_interrupted = False
+        self._hung_up = False
+        self._sent_audio = False
         self.selected_dialogue: ConsentDialogue | None = None
         self.recording_provider: ObjectStorageProvider | None = None
         self.recorder: ConsentGatedCallRecorder | None = None
@@ -196,60 +204,70 @@ class Session:
         language_code: str | None = None,
         speaker: str | None = None,
     ) -> None:
+        if self._turn_interrupted or self._hung_up:
+            return
         async with self.speech_lock:
-            tts_provider = self._create_tts(self.settings)
-            leftover = b""
-            async for audio in tts_provider.stream(
-                text, language_code=language_code, speaker=speaker
-            ):
-                # Keep every frame sample-aligned; a split 16-bit sample plays as static.
-                chunk = leftover + audio.content
-                usable = len(chunk) - len(chunk) % 2
-                chunk, leftover = chunk[:usable], chunk[usable:]
-                if not chunk:
-                    continue
-                if self.recorder:
-                    self.recorder.append_agent_audio(chunk)
-                await self.transport.send_audio(chunk)
-            if self.consent_workflow.state == ConsentState.GRANTED and self.conversation:
-                received_ms = max(0, int((monotonic() - self.started_at) * 1000))
-                agent_segment = TranscriptSegment(
-                    speaker=TranscriptSpeaker.AGENT,
-                    text_encrypted=self.encryptor.encrypt(text),
-                    started_at_ms=received_ms,
-                    ended_at_ms=received_ms,
-                    detected_language=language_code,
-                )
-                result = await self.intake_collection.update_one(
-                    {
-                        "voicebot_session_token_hash": self.session_token_hash,
-                        "disclosures.recording_consent": True,
-                        "disclosures.intake_consent": True,
-                    },
-                    {
-                        "$push": {
-                            "intake.transcript_segments": agent_segment.model_dump(mode="json")
-                        },
-                        "$set": {"updated_at": datetime.now(UTC)},
-                    },
-                )
-                if result.matched_count != 1:
-                    raise RuntimeError("Could not save the consented agent transcript")
+            self._sent_audio = False
+            self._speech_task = asyncio.create_task(
+                self._stream_speech(text, language_code, speaker)
+            )
+            try:
+                await self._speech_task
+            except asyncio.CancelledError:
+                # Only swallow our own interrupt; a cancel aimed at this task must propagate.
+                if asyncio.current_task().cancelling():
+                    raise
+            finally:
+                self._speech_task = None
+            if self._turn_interrupted and not self._sent_audio:
+                return
+            await self._save_agent_segment(text, language_code)
+
+    async def _stream_speech(
+        self, text: str, language_code: str | None, speaker: str | None
+    ) -> None:
+        tts_provider = self._create_tts(self.settings)
+        leftover = b""
+        async for audio in tts_provider.stream(text, language_code=language_code, speaker=speaker):
+            # Keep every frame sample-aligned; a split 16-bit sample plays as static.
+            chunk = leftover + audio.content
+            usable = len(chunk) - len(chunk) % 2
+            chunk, leftover = chunk[:usable], chunk[usable:]
+            if not chunk:
+                continue
+            if self.recorder:
+                self.recorder.append_agent_audio(chunk)
+            await self.transport.send_audio(chunk)
+            self._sent_audio = True
+
+    async def _save_agent_segment(self, text: str, language_code: str | None) -> None:
+        if self.consent_workflow.state != ConsentState.GRANTED or not self.conversation:
+            return
+        received_ms = max(0, int((monotonic() - self.started_at) * 1000))
+        agent_segment = TranscriptSegment(
+            speaker=TranscriptSpeaker.AGENT,
+            text_encrypted=self.encryptor.encrypt(text),
+            started_at_ms=received_ms,
+            ended_at_ms=received_ms,
+            detected_language=language_code,
+        )
+        result = await self.intake_collection.update_one(
+            {
+                "voicebot_session_token_hash": self.session_token_hash,
+                "disclosures.recording_consent": True,
+                "disclosures.intake_consent": True,
+            },
+            {
+                "$push": {"intake.transcript_segments": agent_segment.model_dump(mode="json")},
+                "$set": {"updated_at": datetime.now(UTC)},
+            },
+        )
+        if result.matched_count != 1:
+            raise RuntimeError("Could not save the consented agent transcript")
 
     async def on_transcript(self, event_type: str, transcript: str, language: str | None) -> None:
-        # Runs inside the STT receiver task: an escaped error would silently kill transcription
-        # while the call stays open, so end the call instead.
-        try:
-            await self._handle_transcript(event_type, transcript, language)
-        except Exception:
-            logger.exception("voicebot_turn_failed stream_sid=%s", self.stream_sid)
-            await self._session_event("voicebot_turn_failed")
-            with suppress(RuntimeError):
-                await self.transport.close(status.WS_1011_INTERNAL_ERROR)
-
-    async def _handle_transcript(
-        self, event_type: str, transcript: str, language: str | None
-    ) -> None:
+        # Called from the STT receiver task, so it must return quickly: finals are queued for the
+        # turn worker, and a partial may interrupt the agent mid-sentence (barge-in).
         logger.info(
             "sarvam_stt_transcript_received stream_sid=%s event=%s language=%s characters=%d",
             self.stream_sid,
@@ -257,8 +275,57 @@ class Session:
             language or "unknown",
             len(transcript),
         )
-        if event_type != "transcript.final":
+        if event_type == "transcript.partial" and self.settings.voice_barge_in_enabled:
+            await self._interrupt_speech()
+        elif event_type == "transcript.final":
+            self._turns.put_nowait((transcript, language))
+
+    async def _interrupt_speech(self) -> None:
+        task = self._speech_task
+        if self._turn_interrupted or not task or task.done():
             return
+        self._turn_interrupted = True  # also drops the rest of this turn's planned speech
+        task.cancel()
+        await self._session_event(
+            "voicebot_agent_interrupted",
+            at_ms=max(0, int((monotonic() - self.started_at) * 1000)),
+        )
+        with suppress(RuntimeError):
+            await self.transport.clear()
+
+    async def _turn_worker(self) -> None:
+        while True:
+            item = await self._turns.get()
+            self._turn_interrupted = False
+            try:
+                if item is None:
+                    await self._greet()
+                else:
+                    await self._handle_transcript(*item)
+            except Exception:
+                # An escaped error would leave a live call that never answers; end it instead.
+                logger.exception("voicebot_turn_failed stream_sid=%s", self.stream_sid)
+                await self._session_event("voicebot_turn_failed")
+                with suppress(RuntimeError):
+                    await self.transport.close(status.WS_1011_INTERNAL_ERROR)
+            finally:
+                self._turns.task_done()
+
+    async def _greet(self) -> None:
+        try:
+            await self._speak_language_prompt()
+        except (OSError, ValueError):
+            logger.exception("voicebot_session_start_failed stream_sid=%s", self.stream_sid)
+            await self._session_event("voicebot_stt_start_failed")
+            await self.transport.close(status.WS_1011_INTERNAL_ERROR)
+
+    async def _drain_turns(self) -> None:
+        with suppress(TimeoutError):
+            await asyncio.wait_for(self._turns.join(), timeout=10)
+
+    async def _handle_transcript(
+        self, transcript: str, language: str | None
+    ) -> None:
         if self.language_workflow.state == LanguageSelectionState.AWAITING_SELECTION:
             await self._handle_language_response(transcript)
             return
@@ -546,7 +613,6 @@ class Session:
                         await self._update_call(
                             **{"disclosures.ai_identity_given_at": datetime.now(UTC)}
                         )
-                        await self._speak_language_prompt()
                     except (OSError, ValueError):
                         logger.exception(
                             "voicebot_session_start_failed stream_sid=%s", self.stream_sid
@@ -554,6 +620,8 @@ class Session:
                         await self._session_event("voicebot_stt_start_failed")
                         await self.transport.close(status.WS_1011_INTERNAL_ERROR)
                         return
+                    self._worker = asyncio.create_task(self._turn_worker())
+                    self._turns.put_nowait(None)
                 elif isinstance(event, Audio):
                     if self.recorder:
                         self.recorder.append_caller_audio(event.pcm)
@@ -564,6 +632,11 @@ class Session:
                     await self._session_event("voicebot_stream_stopped")
                     if self.stt_session:
                         await self.stt_session.stop()
+                    # The caller is gone: stop speaking but still finish persisting queued turns.
+                    self._hung_up = True
+                    if self._speech_task:
+                        self._speech_task.cancel()
+                    await self._drain_turns()
                     await self._finalize_recording()
                     await self.transport.close()
                     return
@@ -571,6 +644,9 @@ class Session:
             logger.info("exotel_voicebot_stream_disconnected stream_sid=%s", self.stream_sid)
             await self._session_event("voicebot_stream_disconnected")
         finally:
+            if self._worker:
+                self._worker.cancel()
+                await asyncio.gather(self._worker, return_exceptions=True)
             if self.stt_session:
                 await self.stt_session.stop()
             await self._finalize_recording()

@@ -23,6 +23,9 @@ class FakeWebSocket:
     async def send_bytes(self, data):
         self.sent.append(data)
 
+    async def send_text(self, text):
+        self.sent.append(text)
+
     async def send_json(self, message):
         self.sent.append(message)
 
@@ -92,3 +95,15 @@ async def test_recv_after_server_close_raises_a_clean_disconnect():
         transport._started = True  # skip the browser's synthetic Start
         with pytest.raises(WebSocketDisconnect):
             await transport.recv()
+
+
+async def test_clear_tells_the_far_end_to_drop_buffered_audio():
+    ws = FakeWebSocket([{"event": "start", "start": {"stream_sid": "sid-1"}}])
+    exotel = ExotelTransport(ws)
+    await exotel.recv()
+    await exotel.clear()
+    assert ws.sent == [{"event": "clear", "stream_sid": "sid-1"}]
+
+    browser_ws = FakeWebSocket([])
+    await BrowserTransport(browser_ws).clear()
+    assert browser_ws.sent == ["clear"]

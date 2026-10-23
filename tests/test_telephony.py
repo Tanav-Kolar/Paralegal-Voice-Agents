@@ -839,3 +839,56 @@ def test_unexpected_turn_failure_ends_the_call_instead_of_silently_stalling(monk
 def test_settings_reject_mismatched_stt_and_tts_sample_rates() -> None:
     with pytest.raises(ValueError, match="must match"):
         Settings(_env_file=None, sarvam_stt_sample_rate=8000, sarvam_tts_sample_rate=24000)
+
+
+def _slow_tts_with_barge_in(monkeypatch, *, barge_in: bool):
+    import asyncio
+
+    from app.api.routes import telephony
+    from app.providers.contracts import SpeechAudio
+
+    streamed = []
+
+    class SlowTts:
+        async def stream(self, text, *, language_code=None, speaker=None):
+            streamed.append(text)
+            yield SpeechAudio(content=b"ab", content_type="audio/L16")
+            await asyncio.sleep(30)  # still "speaking" until interrupted
+            yield SpeechAudio(content=b"cd", content_type="audio/L16")
+
+    client, events, stt_sessions, _ = make_client()
+    settings = client.app.dependency_overrides[get_settings]()
+    client.app.dependency_overrides[get_settings] = lambda: settings.model_copy(
+        update={"voice_barge_in_enabled": barge_in}
+    )
+    monkeypatch.setattr(telephony, "_create_tts_provider", lambda settings: SlowTts())
+    return client, events, stt_sessions, streamed
+
+
+def test_barge_in_stops_the_agent_and_clears_buffered_audio(monkeypatch) -> None:
+    client, events, stt_sessions, streamed = _slow_tts_with_barge_in(monkeypatch, barge_in=True)
+    with client:
+        with _stream(client, "barge-in", "s1") as ws:
+            ws.send_json({"event": "start", "start": {"stream_sid": "s1"}})
+            assert ws.receive_json()["event"] == "media"
+            stt_sessions[0].transcript_on_next_audio = ("transcript.partial", "Eng", "en-IN")
+            ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
+            assert ws.receive_json() == {"event": "clear", "stream_sid": "s1"}
+            ws.send_json({"event": "stop"})
+            assert ws.receive()["type"] == "websocket.close"
+    # The Hindi half of the opening prompt is dropped along with the interrupted English half.
+    assert len(streamed) == 1
+    assert any(e["event_type"] == "voicebot_agent_interrupted" for e in events.documents)
+
+
+def test_partial_transcripts_do_not_interrupt_when_barge_in_is_off(monkeypatch) -> None:
+    client, events, stt_sessions, streamed = _slow_tts_with_barge_in(monkeypatch, barge_in=False)
+    with client:
+        with _stream(client, "no-barge-in", "s1") as ws:
+            ws.send_json({"event": "start", "start": {"stream_sid": "s1"}})
+            ws.receive_json()
+            stt_sessions[0].transcript_on_next_audio = ("transcript.partial", "Eng", "en-IN")
+            ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
+            ws.send_json({"event": "stop"})
+            assert ws.receive()["type"] == "websocket.close"
+    assert not any(e["event_type"] == "voicebot_agent_interrupted" for e in events.documents)

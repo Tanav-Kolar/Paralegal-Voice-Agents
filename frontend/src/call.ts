@@ -1,5 +1,6 @@
 // Browser side of a demo call. Binary websocket frames are raw 16-bit mono PCM at 8 kHz in both
-// directions; the text frame "stop" hangs up.
+// directions; the text frame "stop" hangs up. The server may send the text frame "clear" to
+// drop agent audio that is queued but not yet played (barge-in).
 const SAMPLE_RATE = 8000;
 const CHUNK_SAMPLES = 800; // 100 ms
 const AGENT_TAIL_SECONDS = 0.4;
@@ -23,6 +24,7 @@ export class VoiceCall {
   private nextOutput = 0;
   private leftoverByte: number | null = null;
   private playHead = 0;
+  private playing = new Set<AudioBufferSourceNode>();
   private speakingTimer: number | null = null;
   private closing = false;
 
@@ -74,7 +76,10 @@ export class VoiceCall {
     return new Promise((resolve, reject) => {
       ws.onopen = () => resolve();
       ws.onerror = () => reject(new Error("Could not reach the voice service."));
-      ws.onmessage = (event) => this.playAgentAudio(new Uint8Array(event.data as ArrayBuffer));
+      ws.onmessage = (event) => {
+        if (event.data === "clear") this.clearAgentAudio();
+        else if (typeof event.data !== "string") this.playAgentAudio(new Uint8Array(event.data));
+      };
       ws.onclose = (event) => {
         if (this.closing) return;
         this.closing = true;
@@ -146,6 +151,8 @@ export class VoiceCall {
     source.buffer = buffer;
     source.connect(context.destination);
     this.playHead = Math.max(this.playHead, context.currentTime + 0.05);
+    source.onended = () => this.playing.delete(source);
+    this.playing.add(source);
     source.start(this.playHead);
     this.playHead += buffer.duration;
     this.handlers.onAgentSpeaking(true);
@@ -154,6 +161,14 @@ export class VoiceCall {
       () => this.handlers.onAgentSpeaking(this.agentIsSpeaking(context)),
       Math.max(0, (this.playHead - context.currentTime + AGENT_TAIL_SECONDS) * 1000),
     );
+  }
+
+  private clearAgentAudio(): void {
+    this.playing.forEach((source) => source.stop());
+    this.playing.clear();
+    this.leftoverByte = null;
+    this.playHead = 0;
+    this.handlers.onAgentSpeaking(false);
   }
 
   private agentIsSpeaking(context: AudioContext): boolean {
