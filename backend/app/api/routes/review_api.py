@@ -4,20 +4,30 @@ from datetime import datetime
 from pathlib import PurePosixPath
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 
 from app.core.config import Settings, get_settings
 from app.db.mongodb import get_intake_calls_collection
 from app.providers.contracts import ObjectStorageProvider
 from app.providers.gcs import GoogleCloudStorageProvider
+from app.security.access import demo_access_ready, has_access
 
 router = APIRouter()
 
 
-def _require_local_review_api(settings: Settings) -> None:
-    if not settings.local_review_api_enabled or settings.app_env == "production":
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+def review_scope(request: Request, settings: Settings = Depends(get_settings)) -> dict:
+    """Return the Mongo filter for calls this caller may see, or hide the route.
+
+    Local development sees every call; the hosted prototype sees demo calls only.
+    """
+    if settings.local_review_api_enabled and settings.app_env != "production":
+        return {}
+    if demo_access_ready(settings):
+        if not has_access(request.cookies, settings):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Access code required")
+        return {"telephony.provider": "demo"}
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
 
 def _create_object_storage_provider(settings: Settings) -> ObjectStorageProvider:
@@ -46,13 +56,12 @@ def _recording_label(storage_key: str) -> str:
 
 @router.get("/intake-calls")
 async def list_local_review_calls(
-    settings: Settings = Depends(get_settings),
+    scope: dict = Depends(review_scope),
     collection=Depends(get_intake_calls_collection),
 ) -> list[dict[str, object]]:
-    """List masked intake calls for local review, newest first."""
-    _require_local_review_api(settings)
+    """List masked intake calls for review, newest first."""
     cursor = collection.find(
-        {},
+        scope,
         {
             "id": 1,
             "status": 1,
@@ -94,14 +103,16 @@ async def list_local_review_calls(
 async def redirect_to_local_recording(
     intake_call_id: UUID,
     artifact_index: int,
+    scope: dict = Depends(review_scope),
     settings: Settings = Depends(get_settings),
     collection=Depends(get_intake_calls_collection),
 ) -> RedirectResponse:
-    """Issue a short-lived private-object URL for a local playback request."""
-    _require_local_review_api(settings)
+    """Issue a short-lived private-object URL for a playback request."""
     if artifact_index < 0:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recording not found")
-    document = await collection.find_one({"id": str(intake_call_id)}, {"intake.artifacts": 1})
+    document = await collection.find_one(
+        {"id": str(intake_call_id), **scope}, {"intake.artifacts": 1}
+    )
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found")
     artifacts = document.get("intake", {}).get("artifacts", [])
