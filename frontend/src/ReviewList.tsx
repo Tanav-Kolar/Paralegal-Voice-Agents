@@ -1,12 +1,6 @@
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
-import { createRoot } from "react-dom/client";
 
-import {
-  type IntakeCall,
-  loadIntakeCalls,
-  recordingPlaybackUrl,
-} from "./api";
-import "./styles.css";
+import { type IntakeCall, loadIntakeCalls, recordingPlaybackUrl } from "./api";
 
 function formatTimestamp(timestamp: string | null): string {
   if (!timestamp) return "Timestamp unavailable";
@@ -16,7 +10,7 @@ function formatTimestamp(timestamp: string | null): string {
   }).format(new Date(timestamp));
 }
 
-function App() {
+export function ReviewList() {
   const [calls, setCalls] = useState<IntakeCall[]>([]);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
@@ -69,20 +63,7 @@ function App() {
   }
 
   return (
-    <main className="shell">
-      <header className="masthead">
-        <div>
-          <p className="firm">Victus Family Law Firm</p>
-          <h1>Intake listening room</h1>
-          <p className="lede">
-            Local review of consented voice-intake recordings. Caller identities stay masked here.
-          </p>
-        </div>
-        <button className="refresh" onClick={() => void refreshCalls()} type="button">
-          Refresh list
-        </button>
-      </header>
-
+    <>
       <section className="control-bar" aria-label="Call list controls">
         <label>
           <span>Find a call</span>
@@ -92,7 +73,12 @@ function App() {
             placeholder="Masked caller or status"
           />
         </label>
-        <p>{calls.length} calls · newest first</p>
+        <p>
+          {calls.length} calls, newest first{" "}
+          <button className="refresh" onClick={() => void refreshCalls()} type="button">
+            Refresh list
+          </button>
+        </p>
       </section>
 
       {error && <p className="message error">{error}</p>}
@@ -143,8 +129,7 @@ function App() {
           ))}
         </section>
       )}
-    </main>
+    </>
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);

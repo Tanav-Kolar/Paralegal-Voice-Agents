@@ -16,15 +16,15 @@ in the private GCS bucket. It is deliberately separate from the deployed FastAPI
 
 The API remains unavailable when `APP_ENV=production`, even if the flag is set.
 
-## Start the front-end
+## Start the frontend
 
 ```bash
-cd ../front-end
+cd ../frontend
 bun install
 bun dev
 ```
 
-The `cd` command above assumes the current directory is `backend/`; use `cd front-end`
+The `cd` command above assumes the current directory is `backend/`; use `cd frontend`
 from the repository root instead.
 
 Open the local URL printed by Vite, normally `http://127.0.0.1:5173`.

@@ -110,3 +110,22 @@ h1 { font-family: var(--serif); font-size: clamp(2.4rem, 6vw, 4rem); font-weight
   .call-row { align-items: start; grid-template-columns: 1fr; gap: .5rem; }
   .control-bar input { min-width: 0; width: min(100%, 340px); }
 }
+
+.tabs { border-bottom: 1px solid var(--rule); display: flex; gap: 1.5rem; margin-top: 1rem; }
+.tabs button { background: none; border: 0; border-bottom: 3px solid transparent; color: var(--muted); cursor: pointer; padding: .75rem 0; }
+.tabs button[aria-current="page"] { border-bottom-color: var(--stamp); color: var(--ink); font-weight: 600; }
+
+.gate { display: grid; gap: .75rem; justify-items: start; margin-top: 2rem; max-width: 340px; }
+.gate label { display: grid; gap: .35rem; width: 100%; }
+.gate span { color: var(--muted); font-size: .85rem; }
+.gate input { background: var(--sheet); border: 1px solid var(--rule); padding: .6rem .75rem; }
+
+.call-panel { margin-top: 1.5rem; max-width: 56ch; }
+.call-lede { line-height: 1.6; margin: 0 0 1.25rem; }
+.call-controls { align-items: center; display: flex; flex-wrap: wrap; gap: 1rem; }
+.call-status { margin: 0; min-width: 12ch; }
+.meter { background: var(--rule); height: 6px; width: 120px; }
+.meter span { background: var(--stamp); display: block; height: 100%; transition: width 80ms linear; }
+.call-done { margin: 1.25rem 0 0; }
+
+@media (prefers-reduced-motion: reduce) { .meter span { transition: none; } }

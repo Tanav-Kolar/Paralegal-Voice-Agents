@@ -208,8 +208,8 @@ cython_debug/
 tempCodeRunnerFile.py
 
 # Bun/Vite front-end dependencies and build output
-front-end/node_modules/
-front-end/dist/
+frontend/node_modules/
+frontend/dist/
 
 # Ruff stuff:
 .ruff_cache/

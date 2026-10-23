@@ -307,12 +307,13 @@ async def _create_voicebot_intake_call(
     call_sid: str,
     caller_phone: str,
     session_token: str,
+    provider: str = "exotel",
 ) -> None:
     intake_call = encrypt_intake_call(
         IntakeCallCreateRequest(
             status=CallStatus.CONSENT_PENDING,
             telephony=TelephonyDetailsInput(
-                provider="exotel",
+                provider=provider,
                 provider_call_id=call_sid,
                 caller_phone=caller_phone,
                 started_at=datetime.now(UTC),
@@ -423,6 +424,28 @@ async def exotel_voicebot_stream(
         return
 
     session_token = session_token_from_auth or websocket.query_params.get("session_token", "")
+    await run_voicebot_stream(
+        websocket,
+        session_token=session_token,
+        settings=settings,
+        collection=collection,
+        intake_collection=intake_collection,
+        audit_collection=audit_collection,
+        encryptor=encryptor,
+    )
+
+
+async def run_voicebot_stream(
+    websocket: WebSocket,
+    *,
+    session_token: str,
+    settings: Settings,
+    collection,
+    intake_collection,
+    audit_collection,
+    encryptor: FieldEncryptor,
+) -> None:
+    """Run one consent-gated intake session for an already-authenticated stream token."""
     session_token_hash = _voicebot_session_token_hash(session_token)
     intake_call = await intake_collection.find_one(
         {"voicebot_session_token_hash": session_token_hash}, {"id": 1}
