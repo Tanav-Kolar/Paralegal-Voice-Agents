@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     gcs_service_account_key_path: str = ""
     gcs_signed_url_ttl_minutes: int = Field(default=10, ge=1, le=60)
     local_review_api_enabled: bool = False
+    demo_mode_enabled: bool = False
+    demo_access_code: str = ""
+    access_cookie_secret: str = ""
+    demo_session_max_seconds: int = Field(default=300, ge=30, le=1800)
+    demo_max_concurrent_sessions: int = Field(default=3, ge=1, le=20)
     field_encryption_key: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
