@@ -1,4 +1,4 @@
-from base64 import b64encode
+from base64 import b64decode, b64encode
 from io import BytesIO
 from urllib.parse import urlsplit
 from wave import open as wave_open
@@ -770,3 +770,72 @@ def test_conversation_provider_failure_stops_intake_and_keeps_previous_transcrip
     caller_segments = [s for s in call["intake"]["transcript_segments"] if s["speaker"] == "caller"]
     assert events.encryptor.decrypt(caller_segments[0]["text_encrypted"]) == "A private response"
     assert any(e["event_type"] == "voicebot_conversation_unavailable" for e in events.documents)
+
+
+def _stream(client, sid: str, stream_sid: str):
+    credentials = b64encode(f"{VOICEBOT_USERNAME}:{VOICEBOT_PASSWORD}".encode()).decode()
+    return client.websocket_connect(
+        resolve_voicebot_stream_path(client, sid),
+        headers={"Authorization": f"Basic {credentials}"},
+    )
+
+
+def test_duplicate_start_event_is_ignored() -> None:
+    client, events, stt_sessions, tts_providers = make_client()
+    with client:
+        with _stream(client, "dup-start", "s1") as ws:
+            ws.send_json({"event": "start", "start": {"stream_sid": "s1"}})
+            ws.receive_json()
+            ws.receive_json()
+            ws.send_json({"event": "start", "start": {"stream_sid": "s2"}})
+            ws.send_json({"event": "stop"})
+    assert len(stt_sessions) == 1 and len(tts_providers) == 2
+
+
+def test_outbound_audio_frames_are_sample_aligned(monkeypatch) -> None:
+    from app.api.routes import telephony
+    from app.providers.contracts import SpeechAudio
+
+    class OddChunkTts:
+        async def stream(self, text, *, language_code=None, speaker=None):
+            yield SpeechAudio(content=b"abc", content_type="audio/L16")
+            yield SpeechAudio(content=b"defg", content_type="audio/L16")
+
+    client, *_ = make_client()
+    monkeypatch.setattr(telephony, "_create_tts_provider", lambda settings: OddChunkTts())
+    with client:
+        with _stream(client, "aligned", "s1") as ws:
+            ws.send_json({"event": "start", "start": {"stream_sid": "s1"}})
+            frames = [b64decode(ws.receive_json()["media"]["payload"]) for _ in range(2)]
+            ws.send_json({"event": "stop"})
+    assert frames == [b"ab", b"cdef"]
+
+
+def test_unexpected_turn_failure_ends_the_call_instead_of_silently_stalling(monkeypatch) -> None:
+    from app.api.routes import telephony
+
+    client, events, stt_sessions, tts_providers = make_client()
+    prompts_spoken = 0
+    original = telephony._create_tts_provider
+
+    def failing_after_prompts(settings):
+        nonlocal prompts_spoken
+        prompts_spoken += 1
+        if prompts_spoken > 2:
+            raise RuntimeError("tts exploded")
+        return original(settings)
+
+    monkeypatch.setattr(telephony, "_create_tts_provider", failing_after_prompts)
+    with client:
+        with _stream(client, "turn-failure", "s1") as ws:
+            ws.send_json({"event": "start", "start": {"stream_sid": "s1"}})
+            ws.receive_json()
+            ws.receive_json()
+            stt_sessions[0].transcript_on_next_audio = ("transcript.final", "English", "en-IN")
+            ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
+    assert any(e["event_type"] == "voicebot_turn_failed" for e in events.documents)
+
+
+def test_settings_reject_mismatched_stt_and_tts_sample_rates() -> None:
+    with pytest.raises(ValueError, match="must match"):
+        Settings(_env_file=None, sarvam_stt_sample_rate=8000, sarvam_tts_sample_rate=24000)

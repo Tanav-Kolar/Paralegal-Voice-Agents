@@ -2,6 +2,7 @@ import logging
 from asyncio import Lock
 from base64 import b64encode
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import UTC, datetime
 from time import monotonic
 from uuid import UUID
@@ -197,12 +198,19 @@ class Session:
     ) -> None:
         async with self.speech_lock:
             tts_provider = self._create_tts(self.settings)
+            leftover = b""
             async for audio in tts_provider.stream(
                 text, language_code=language_code, speaker=speaker
             ):
+                # Keep every frame sample-aligned; a split 16-bit sample plays as static.
+                chunk = leftover + audio.content
+                usable = len(chunk) - len(chunk) % 2
+                chunk, leftover = chunk[:usable], chunk[usable:]
+                if not chunk:
+                    continue
                 if self.recorder:
-                    self.recorder.append_agent_audio(audio.content)
-                await self.transport.send_audio(audio.content)
+                    self.recorder.append_agent_audio(chunk)
+                await self.transport.send_audio(chunk)
             if self.consent_workflow.state == ConsentState.GRANTED and self.conversation:
                 received_ms = max(0, int((monotonic() - self.started_at) * 1000))
                 agent_segment = TranscriptSegment(
@@ -229,6 +237,19 @@ class Session:
                     raise RuntimeError("Could not save the consented agent transcript")
 
     async def on_transcript(self, event_type: str, transcript: str, language: str | None) -> None:
+        # Runs inside the STT receiver task: an escaped error would silently kill transcription
+        # while the call stays open, so end the call instead.
+        try:
+            await self._handle_transcript(event_type, transcript, language)
+        except Exception:
+            logger.exception("voicebot_turn_failed stream_sid=%s", self.stream_sid)
+            await self._session_event("voicebot_turn_failed")
+            with suppress(RuntimeError):
+                await self.transport.close(status.WS_1011_INTERNAL_ERROR)
+
+    async def _handle_transcript(
+        self, event_type: str, transcript: str, language: str | None
+    ) -> None:
         logger.info(
             "sarvam_stt_transcript_received stream_sid=%s event=%s language=%s characters=%d",
             self.stream_sid,
@@ -436,7 +457,9 @@ class Session:
     async def _start_recording(self) -> None:
         try:
             self.recording_provider = self._create_storage(self.settings)
-            self.recorder = ConsentGatedCallRecorder(self.settings.sarvam_stt_sample_rate)
+            self.recorder = ConsentGatedCallRecorder(
+                self.settings.sarvam_stt_sample_rate, self.settings.sarvam_tts_sample_rate
+            )
             await self._update_call(**{"disclosures.recording_started_at": datetime.now(UTC)})
             await self._session_event("voicebot_recording_started")
         except (OSError, ValueError):
@@ -509,6 +532,11 @@ class Session:
             while True:
                 event = await self.transport.recv()
                 if isinstance(event, Start):
+                    if self.stt_session:
+                        logger.warning(
+                            "voicebot_duplicate_start_ignored stream_sid=%s", self.stream_sid
+                        )
+                        continue
                     self.stream_sid = event.stream_sid
                     logger.info("exotel_voicebot_stream_started stream_sid=%s", self.stream_sid)
                     await self._session_event("voicebot_stream_started")

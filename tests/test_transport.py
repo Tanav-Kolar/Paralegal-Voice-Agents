@@ -2,11 +2,14 @@ from base64 import b64decode
 
 import pytest
 from fastapi import WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 from app.voice.transport import Audio, BrowserTransport, ExotelTransport, Start, Stop
 
 
 class FakeWebSocket:
+    application_state = WebSocketState.CONNECTED
+
     def __init__(self, frames):
         self.frames = list(frames)
         self.sent = []
@@ -79,3 +82,13 @@ async def test_browser_transport_starts_itself_and_maps_raw_frames():
 
     await transport.send_audio(b"\x09")
     assert ws.sent == [b"\x09"]
+
+
+async def test_recv_after_server_close_raises_a_clean_disconnect():
+    ws = FakeWebSocket([])
+    ws.application_state = WebSocketState.DISCONNECTED
+
+    for transport in (ExotelTransport(ws), BrowserTransport(ws)):
+        transport._started = True  # skip the browser's synthetic Start
+        with pytest.raises(WebSocketDisconnect):
+            await transport.recv()

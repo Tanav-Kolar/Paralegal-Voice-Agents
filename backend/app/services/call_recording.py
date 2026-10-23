@@ -16,8 +16,9 @@ class RecordedAudioTrack:
 class ConsentGatedCallRecorder:
     """Keep post-consent Linear16 audio in separate caller and agent tracks."""
 
-    def __init__(self, sample_rate: int) -> None:
-        self._sample_rate = sample_rate
+    def __init__(self, sample_rate: int, agent_sample_rate: int | None = None) -> None:
+        self._caller_rate = sample_rate
+        self._agent_rate = agent_sample_rate or sample_rate
         self._caller_pcm = bytearray()
         self._agent_pcm = bytearray()
 
@@ -32,24 +33,25 @@ class ConsentGatedCallRecorder:
     def to_wav_tracks(self) -> list[RecordedAudioTrack]:
         """Return non-empty, standard mono WAV tracks suitable for private storage."""
         tracks: list[RecordedAudioTrack] = []
-        for filename, pcm_audio in (
-            ("recording-caller.wav", self._caller_pcm),
-            ("recording-agent.wav", self._agent_pcm),
+        for filename, pcm_audio, sample_rate in (
+            ("recording-caller.wav", self._caller_pcm, self._caller_rate),
+            ("recording-agent.wav", self._agent_pcm, self._agent_rate),
         ):
             if pcm_audio:
                 tracks.append(
                     RecordedAudioTrack(
                         filename=filename,
-                        content=self._as_wav(bytes(pcm_audio)),
+                        content=self._as_wav(bytes(pcm_audio), sample_rate),
                     )
                 )
         return tracks
 
-    def _as_wav(self, pcm_audio: bytes) -> bytes:
+    @staticmethod
+    def _as_wav(pcm_audio: bytes, sample_rate: int) -> bytes:
         output = BytesIO()
         with wave_open(output, "wb") as wav_file:
             wav_file.setnchannels(1)
             wav_file.setsampwidth(2)
-            wav_file.setframerate(self._sample_rate)
+            wav_file.setframerate(sample_rate)
             wav_file.writeframes(pcm_audio)
         return output.getvalue()

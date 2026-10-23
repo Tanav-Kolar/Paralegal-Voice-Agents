@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -82,6 +82,13 @@ class Settings(BaseSettings):
         if value not in {8000, 16000, 22050, 24000}:
             raise ValueError("SARVAM_TTS_SAMPLE_RATE must be a supported streaming sample rate")
         return value
+
+    @model_validator(mode="after")
+    def validate_matching_voice_sample_rates(self) -> "Settings":
+        # Caller and agent audio share one transport stream, so the rates cannot differ.
+        if self.sarvam_stt_sample_rate != self.sarvam_tts_sample_rate:
+            raise ValueError("SARVAM_STT_SAMPLE_RATE and SARVAM_TTS_SAMPLE_RATE must match")
+        return self
 
 
 @lru_cache

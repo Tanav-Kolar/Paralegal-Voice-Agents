@@ -5,6 +5,7 @@ from typing import Protocol
 from uuid import uuid4
 
 from fastapi import WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,13 @@ class Stop:
 
 
 TransportEvent = Start | Audio | Stop
+
+
+def _require_open(websocket: WebSocket) -> None:
+    # After we close from a callback, receiving would raise a bare RuntimeError; end the loop
+    # through the normal disconnect path instead.
+    if websocket.application_state != WebSocketState.CONNECTED:
+        raise WebSocketDisconnect(1000)
 
 
 class Transport(Protocol):
@@ -54,6 +62,7 @@ class ExotelTransport:
         await self._websocket.accept()
 
     async def recv(self) -> TransportEvent | None:
+        _require_open(self._websocket)
         message = await self._websocket.receive_json()
         event = message.get("event")
         if event == "start":
@@ -104,6 +113,7 @@ class BrowserTransport:
         if not self._started:
             self._started = True
             return Start(self._stream_sid)
+        _require_open(self._websocket)
         message = await self._websocket.receive()
         if message["type"] == "websocket.disconnect":
             raise WebSocketDisconnect(message.get("code", 1000))
