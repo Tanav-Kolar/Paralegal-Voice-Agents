@@ -1,7 +1,7 @@
 """Browser-driven demo sessions for the hosted prototype.
 
-Sessions reuse the Exotel Voicebot stream handler, so the demo exercises the same consent,
-language, recording and transcript pipeline as a real call.
+Sessions run the same Session as a real call, over a BrowserTransport (raw PCM frames), so the
+demo exercises the same consent, language, recording and transcript pipeline.
 """
 
 import asyncio
@@ -23,6 +23,7 @@ from app.db.mongodb import (
 )
 from app.security.access import ACCESS_COOKIE, demo_access_ready, has_access, require_access
 from app.security.field_encryption import FieldEncryptor, get_field_encryptor
+from app.voice.transport import BrowserTransport
 
 router = APIRouter()
 
@@ -90,7 +91,7 @@ async def demo_stream(
     try:
         async with asyncio.timeout(settings.demo_session_max_seconds):
             await run_voicebot_stream(
-                websocket,
+                BrowserTransport(websocket),
                 session_token=session_token,
                 settings=settings,
                 collection=collection,

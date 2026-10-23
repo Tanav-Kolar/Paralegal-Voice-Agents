@@ -46,7 +46,7 @@ from app.voice.session import (  # noqa: F401  (prompts are re-exported for call
     LANGUAGE_SELECTION_PROMPT,
     Session,
 )
-from app.voice.transport import ExotelTransport
+from app.voice.transport import ExotelTransport, Transport
 from app.workflows.conversation import (
     ConversationProvider,
 )
@@ -295,7 +295,7 @@ async def exotel_voicebot_stream(
 
     session_token = session_token_from_auth or websocket.query_params.get("session_token", "")
     await run_voicebot_stream(
-        websocket,
+        ExotelTransport(websocket),
         session_token=session_token,
         settings=settings,
         collection=collection,
@@ -306,7 +306,7 @@ async def exotel_voicebot_stream(
 
 
 async def run_voicebot_stream(
-    websocket: WebSocket,
+    transport: Transport,
     *,
     session_token: str,
     settings: Settings,
@@ -316,7 +316,6 @@ async def run_voicebot_stream(
     encryptor: FieldEncryptor,
 ) -> None:
     """Run one consent-gated intake session for an already-authenticated stream token."""
-    transport = ExotelTransport(websocket)
     session_token_hash = _voicebot_session_token_hash(session_token)
     intake_call = await intake_collection.find_one(
         {"voicebot_session_token_hash": session_token_hash}, {"id": 1}

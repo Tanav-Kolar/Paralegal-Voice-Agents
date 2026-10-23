@@ -1,9 +1,9 @@
 import pytest
 from starlette.websockets import WebSocketDisconnect
 from test_telephony import (
-    WEBHOOK_TOKEN,
     VOICEBOT_PASSWORD,
     VOICEBOT_USERNAME,
+    WEBHOOK_TOKEN,
     make_client,
     resolve_voicebot_stream_path,
 )
@@ -53,15 +53,15 @@ def test_demo_session_streams_the_same_intake_pipeline() -> None:
         login(client)
         session = client.post("/api/v1/demo/session").json()
         with client.websocket_connect(session["streamPath"]) as websocket:
-            websocket.send_json({"event": "start", "start": {"stream_sid": "demo-stream-1"}})
-            assert websocket.receive_json()["event"] == "media"
-            websocket.receive_json()
-            websocket.send_json({"event": "stop"})
+            assert websocket.receive_bytes()
+            websocket.receive_bytes()
+            websocket.send_text("stop")
 
     call = events.intake_calls.documents[0]
     assert call["telephony"]["provider"] == "demo"
     assert call["id"] == session["intakeCallId"]
     assert len(stt_sessions) == 1 and len(tts_providers) == 2
+    assert events.documents and {e["provider"] for e in events.documents} == {"demo"}
 
 
 def test_demo_stream_rejects_missing_access_cookie() -> None:
@@ -95,9 +95,8 @@ def test_demo_stream_limits_one_active_session_per_visitor() -> None:
         first = client.post("/api/v1/demo/session").json()["streamPath"]
         second = client.post("/api/v1/demo/session").json()["streamPath"]
         with client.websocket_connect(first) as websocket:
-            websocket.send_json({"event": "start", "start": {"stream_sid": "a"}})
-            websocket.receive_json()
+            websocket.receive_bytes()
             with pytest.raises(WebSocketDisconnect) as error, client.websocket_connect(second):
                 pass
             assert error.value.code == 1013
-            websocket.send_json({"event": "stop"})
+            websocket.send_text("stop")

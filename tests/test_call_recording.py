@@ -1,14 +1,12 @@
 from io import BytesIO
 from wave import open as wave_open
 
-import pytest
-
 from app.services.call_recording import ConsentGatedCallRecorder
 
 
 def test_call_recorder_outputs_only_non_empty_wav_tracks() -> None:
     recorder = ConsentGatedCallRecorder(sample_rate=8000)
-    recorder.append_caller_payload("Y2FsbGVyLXBjbQ==")
+    recorder.append_caller_audio(b"caller-pcm")
 
     tracks = recorder.to_wav_tracks()
 
@@ -19,9 +17,3 @@ def test_call_recorder_outputs_only_non_empty_wav_tracks() -> None:
         assert wav_file.getframerate() == 8000
         assert wav_file.readframes(wav_file.getnframes()) == b"caller-pcm"
 
-
-def test_call_recorder_rejects_invalid_caller_audio() -> None:
-    recorder = ConsentGatedCallRecorder(sample_rate=8000)
-
-    with pytest.raises(ValueError, match="not valid base64"):
-        recorder.append_caller_payload("not-base64")

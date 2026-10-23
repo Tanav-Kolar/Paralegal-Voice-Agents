@@ -1,5 +1,5 @@
-// Browser side of a demo call. Speaks the same JSON protocol as an Exotel Voicebot stream:
-// 16-bit mono PCM at 8 kHz, base64-encoded, in start / media / stop events.
+// Browser side of a demo call. Binary websocket frames are raw 16-bit mono PCM at 8 kHz in both
+// directions; the text frame "stop" hangs up.
 const SAMPLE_RATE = 8000;
 const CHUNK_SAMPLES = 800; // 100 ms
 const AGENT_TAIL_SECONDS = 0.4;
@@ -12,19 +12,10 @@ type Handlers = {
   onAgentSpeaking: (speaking: boolean) => void;
 };
 
-function toBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  }
-  return btoa(binary);
-}
-
 export class VoiceCall {
   private ws: WebSocket | null = null;
   private context: AudioContext | null = null;
   private stream: MediaStream | null = null;
-  private streamSid = crypto.randomUUID();
   private pending: number[] = [];
   private sum = 0;
   private count = 0;
@@ -68,7 +59,7 @@ export class VoiceCall {
     if (this.closing) return;
     this.closing = true;
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ event: "stop" }));
+      this.ws.send("stop");
       this.ws.close();
     }
     this.release();
@@ -78,14 +69,12 @@ export class VoiceCall {
   private openSocket(streamPath: string): Promise<void> {
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${scheme}://${location.host}${streamPath}`);
+    ws.binaryType = "arraybuffer";
     this.ws = ws;
     return new Promise((resolve, reject) => {
-      ws.onopen = () => {
-        ws.send(JSON.stringify({ event: "start", start: { stream_sid: this.streamSid } }));
-        resolve();
-      };
+      ws.onopen = () => resolve();
       ws.onerror = () => reject(new Error("Could not reach the voice service."));
-      ws.onmessage = (event) => this.playAgentAudio(event.data as string);
+      ws.onmessage = (event) => this.playAgentAudio(new Uint8Array(event.data as ArrayBuffer));
       ws.onclose = (event) => {
         if (this.closing) return;
         this.closing = true;
@@ -136,25 +125,16 @@ export class VoiceCall {
     samples.forEach((sample, i) => {
       pcm[i] = Math.max(-1, Math.min(1, sample)) * 0x7fff;
     });
-    this.ws.send(
-      JSON.stringify({
-        event: "media",
-        stream_sid: this.streamSid,
-        media: { payload: toBase64(new Uint8Array(pcm.buffer)) },
-      }),
-    );
+    this.ws.send(pcm.buffer);
   }
 
-  private playAgentAudio(raw: string): void {
+  private playAgentAudio(incoming: Uint8Array): void {
     const context = this.context;
     if (!context) return;
-    const message = JSON.parse(raw);
-    if (message.event !== "media") return;
-    const decoded = atob(message.media.payload);
-    const bytes = new Uint8Array(decoded.length + (this.leftoverByte === null ? 0 : 1));
+    const bytes = new Uint8Array(incoming.length + (this.leftoverByte === null ? 0 : 1));
     let offset = 0;
     if (this.leftoverByte !== null) bytes[offset++] = this.leftoverByte;
-    for (let i = 0; i < decoded.length; i++) bytes[offset + i] = decoded.charCodeAt(i);
+    bytes.set(incoming, offset);
     const usable = bytes.length - (bytes.length % 2);
     this.leftoverByte = usable < bytes.length ? bytes[usable] : null;
     if (usable === 0) return;

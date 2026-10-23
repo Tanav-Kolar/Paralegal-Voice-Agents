@@ -1,7 +1,5 @@
 """Consent-gated in-memory PCM recording for a single voicebot session."""
 
-from base64 import b64decode
-from binascii import Error as BinasciiError
 from dataclasses import dataclass
 from io import BytesIO
 from wave import open as wave_open
@@ -23,12 +21,9 @@ class ConsentGatedCallRecorder:
         self._caller_pcm = bytearray()
         self._agent_pcm = bytearray()
 
-    def append_caller_payload(self, encoded_payload: str) -> None:
-        """Append a caller media frame, rejecting malformed payloads."""
-        try:
-            self._caller_pcm.extend(b64decode(encoded_payload, validate=True))
-        except BinasciiError as error:
-            raise ValueError("Caller audio payload is not valid base64") from error
+    def append_caller_audio(self, pcm_audio: bytes) -> None:
+        """Append a caller Linear16 PCM frame."""
+        self._caller_pcm.extend(pcm_audio)
 
     def append_agent_audio(self, pcm_audio: bytes) -> None:
         """Append an agent Linear16 PCM frame."""

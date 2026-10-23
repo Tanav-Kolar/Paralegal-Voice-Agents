@@ -1,5 +1,6 @@
 import logging
 from asyncio import Lock
+from base64 import b64encode
 from collections.abc import Callable
 from datetime import UTC, datetime
 from time import monotonic
@@ -80,14 +81,16 @@ def speaker_for_language(settings: Settings, language: LanguageChoice) -> str:
 
 
 async def record_voicebot_session_event(
-    collection, stream_sid: str | None, event_type: str, **fields: object
+    collection, stream_sid: str | None, event_type: str, provider: str, **fields: object
 ) -> None:
     """Record Voicebot lifecycle metadata without retaining media or transcript content."""
     if not stream_sid:
         logger.warning("exotel_voicebot_%s_missing_stream_sid", event_type)
         return
     try:
-        await record_event(collection, stream_sid, event_type, stream_sid=stream_sid, **fields)
+        await record_event(
+            collection, stream_sid, event_type, provider=provider, stream_sid=stream_sid, **fields
+        )
     except Exception:
         logger.exception(
             "exotel_voicebot_%s_event_record_failed stream_sid=%s", event_type, stream_sid
@@ -176,7 +179,9 @@ class Session:
         return speaker_for_language(self.settings, language)
 
     async def _session_event(self, event_type: str, **fields: object) -> None:
-        await record_voicebot_session_event(self.collection, self.stream_sid, event_type, **fields)
+        await record_voicebot_session_event(
+            self.collection, self.stream_sid, event_type, self.transport.provider, **fields
+        )
 
     async def _update_call(self, **fields: object) -> None:
         await update_voicebot_intake_call(
@@ -523,14 +528,9 @@ class Session:
                         return
                 elif isinstance(event, Audio):
                     if self.recorder:
-                        try:
-                            self.recorder.append_caller_payload(event.payload)
-                        except ValueError:
-                            logger.warning(
-                                "voicebot_recording_invalid_audio stream_sid=%s", self.stream_sid
-                            )
+                        self.recorder.append_caller_audio(event.pcm)
                     if self.stt_session and self._wants_caller_audio():
-                        await self.stt_session.send_audio(event.payload)
+                        await self.stt_session.send_audio(b64encode(event.pcm).decode())
                 elif isinstance(event, Stop):
                     logger.info("exotel_voicebot_stream_stopped stream_sid=%s", self.stream_sid)
                     await self._session_event("voicebot_stream_stopped")
