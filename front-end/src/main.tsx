@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import {
@@ -22,6 +22,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [playingKey, setPlayingKey] = useState<string | null>(null);
+  const [progress, setProgress] = useState(0);
   const activeAudio = useRef<HTMLAudioElement | null>(null);
 
   async function refreshCalls() {
@@ -55,6 +56,10 @@ function App() {
     const audio = new Audio(recordingPlaybackUrl(call.id, artifactIndex));
     activeAudio.current = audio;
     setPlayingKey(key);
+    setProgress(0);
+    audio.addEventListener("timeupdate", () =>
+      setProgress(audio.duration ? (audio.currentTime / audio.duration) * 100 : 0),
+    );
     audio.addEventListener("ended", () => setPlayingKey(null), { once: true });
     audio.addEventListener("error", () => {
       setPlayingKey(null);
@@ -67,7 +72,7 @@ function App() {
     <main className="shell">
       <header className="masthead">
         <div>
-          <p className="kicker">Victus Family Law Firm</p>
+          <p className="firm">Victus Family Law Firm</p>
           <h1>Intake listening room</h1>
           <p className="lede">
             Local review of consented voice-intake recordings. Caller identities stay masked here.
@@ -98,7 +103,15 @@ function App() {
       ) : (
         <section className="call-list" aria-label="Voice intake calls">
           {visibleCalls.map((call) => (
-            <article className="call-row" key={call.id}>
+            <article
+              className={playingKey?.startsWith(`${call.id}:`) ? "call-row playing" : "call-row"}
+              key={call.id}
+              style={
+                playingKey?.startsWith(`${call.id}:`)
+                  ? ({ "--progress": `${progress}%` } as CSSProperties)
+                  : undefined
+              }
+            >
               <div className="call-identity">
                 <p className="timestamp">{formatTimestamp(call.receivedAt)}</p>
                 <h2>{call.callerPhoneMasked}</h2>
