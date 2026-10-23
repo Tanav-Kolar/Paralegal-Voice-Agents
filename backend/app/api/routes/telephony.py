@@ -1,13 +1,10 @@
 import logging
-from asyncio import Lock
 from base64 import b64decode
 from binascii import Error as BinasciiError
 from datetime import UTC, datetime
 from hashlib import sha256
 from hmac import new as hmac_new
-from json import dumps
 from secrets import compare_digest
-from time import monotonic
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
@@ -17,7 +14,6 @@ from fastapi import (
     HTTPException,
     Request,
     WebSocket,
-    WebSocketDisconnect,
     status,
 )
 
@@ -36,65 +32,27 @@ from app.providers.contracts import (
 from app.providers.gcs import GoogleCloudStorageProvider
 from app.providers.sarvam import SarvamRealtimeSpeechToTextSession, SarvamStreamingTextToSpeech
 from app.providers.sarvam_chat import SarvamConversationProvider
-from app.schemas.audit_event import IntakeAuditEventType
 from app.schemas.intake_call import (
-    ArtifactKind,
     CallStatus,
     IntakeCallCreateRequest,
-    LanguageChoice,
-    ProtectedObjectReference,
     TelephonyDetailsInput,
-    TranscriptSegment,
-    TranscriptSpeaker,
 )
 from app.security.field_encryption import FieldEncryptor, get_field_encryptor
-from app.services.audit import record_audit_event, record_intake_creation_audit_events
-from app.services.call_recording import ConsentGatedCallRecorder
+from app.services.audit import record_intake_creation_audit_events
+from app.services.call_events import record_event
 from app.services.intake_encryption import encrypt_intake_call
-from app.voice.transport import Audio, ExotelTransport, Start, Stop
-from app.workflows.consent import (
-    ConsentAction,
-    ConsentDialogue,
-    ConsentState,
-    ConsentWorkflow,
-    get_consent_dialogue,
+from app.voice.session import (  # noqa: F401  (prompts are re-exported for callers and tests)
+    HINDI_LANGUAGE_SELECTION_PROMPT,
+    LANGUAGE_SELECTION_PROMPT,
+    Session,
 )
+from app.voice.transport import ExotelTransport
 from app.workflows.conversation import (
     ConversationProvider,
-    ConversationUnavailable,
-    ConversationWorkflow,
-)
-from app.workflows.language import (
-    LanguageSelectionAction,
-    LanguageSelectionState,
-    LanguageSelectionWorkflow,
 )
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-LANGUAGE_SELECTION_PROMPT = (
-    "Hello. I am an AI assistant for the law firm. Please say English or Hindi to choose your "
-    "language."
-)
-HINDI_LANGUAGE_SELECTION_PROMPT = (
-    "नमस्ते। मैं लॉ फर्म की एआई सहायक हूँ। अपनी भाषा चुनने के लिए कृपया अंग्रेज़ी या हिंदी कहें।"
-)
-LANGUAGE_SELECTION_REPROMPT = "Please say English or Hindi."
-HINDI_LANGUAGE_SELECTION_REPROMPT = "कृपया अंग्रेज़ी या हिंदी कहें।"
-LANGUAGE_SELECTION_UNCLEAR_CLOSURE = (
-    "I was unable to confirm your language choice, so I will not collect case information. "
-    "Thank you for calling. Goodbye."
-)
-HINDI_LANGUAGE_SELECTION_UNCLEAR_CLOSURE = (
-    "मैं आपकी भाषा की पुष्टि नहीं कर सकी, इसलिए मामले की जानकारी नहीं लूँगी। धन्यवाद। नमस्ते।"
-)
-CONVERSATION_UNAVAILABLE = {
-    LanguageChoice.ENGLISH: (
-        "I am unable to continue the intake right now. Thank you for calling. Goodbye."
-    ),
-    LanguageChoice.HINDI: "मैं अभी इंटेक आगे नहीं बढ़ा सकती। कॉल करने के लिए धन्यवाद। नमस्ते।",
-}
 
 # Exotel status fields we keep. Caller/callee numbers (From/To) are deliberately excluded.
 STATUS_FIELDS = {
@@ -242,64 +200,6 @@ def _create_object_storage_provider(settings: Settings) -> ObjectStorageProvider
     return GoogleCloudStorageProvider.from_settings(settings)
 
 
-def _speaker_for_language(settings: Settings, language: LanguageChoice) -> str:
-    return {
-        LanguageChoice.ENGLISH: settings.sarvam_tts_speaker,
-        LanguageChoice.HINDI: settings.sarvam_tts_hindi_speaker,
-    }[language]
-
-
-def _event_key(call_sid: str, event_type: str, fields: dict[str, object]) -> str:
-    payload = {
-        "provider": "exotel",
-        "provider_call_id": call_sid,
-        "event_type": event_type,
-        "fields": fields,
-    }
-    return sha256(dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
-async def _record_event(collection, call_sid: str, event_type: str, **fields) -> bool:
-    event_key = _event_key(call_sid, event_type, fields)
-    result = await collection.update_one(
-        {"event_key": event_key},
-        {
-            "$setOnInsert": {
-                "event_key": event_key,
-                "provider": "exotel",
-                "provider_call_id": call_sid,
-                "event_type": event_type,
-                "received_at": datetime.now(UTC),
-                **fields,
-            }
-        },
-        upsert=True,
-    )
-    inserted = result.upserted_id is not None
-    logger.info(
-        "exotel_%s_%s call_sid=%s",
-        event_type,
-        "received" if inserted else "duplicate",
-        call_sid,
-    )
-    return inserted
-
-
-async def _record_voicebot_session_event(
-    collection, stream_sid: str | None, event_type: str, **fields: object
-) -> None:
-    """Record Voicebot lifecycle metadata without retaining media or transcript content."""
-    if not stream_sid:
-        logger.warning("exotel_voicebot_%s_missing_stream_sid", event_type)
-        return
-    try:
-        await _record_event(collection, stream_sid, event_type, stream_sid=stream_sid, **fields)
-    except Exception:
-        logger.exception(
-            "exotel_voicebot_%s_event_record_failed stream_sid=%s", event_type, stream_sid
-        )
-
-
 async def _create_voicebot_intake_call(
     *,
     collection,
@@ -333,37 +233,6 @@ async def _create_voicebot_intake_call(
         await record_intake_creation_audit_events(audit_collection, intake_call)
 
 
-async def _update_voicebot_intake_call(
-    collection,
-    session_token_hash: str,
-    **fields: object,
-) -> None:
-    result = await collection.update_one(
-        {"voicebot_session_token_hash": session_token_hash},
-        {"$set": {**fields, "updated_at": datetime.now(UTC)}},
-    )
-    if result.matched_count != 1:
-        logger.warning("voicebot_intake_update_not_matched")
-
-
-async def _attach_voicebot_recording_artifact(
-    collection,
-    session_token_hash: str,
-    artifact: ProtectedObjectReference,
-) -> bool:
-    result = await collection.update_one(
-        {"voicebot_session_token_hash": session_token_hash},
-        {
-            "$push": {"intake.artifacts": artifact.model_dump(mode="json")},
-            "$set": {"updated_at": datetime.now(UTC)},
-        },
-    )
-    if result.matched_count != 1:
-        logger.warning("voicebot_recording_artifact_not_matched")
-        return False
-    return True
-
-
 @router.get("/exotel/passthru", status_code=status.HTTP_200_OK)
 async def exotel_passthru(
     request: Request,
@@ -375,7 +244,7 @@ async def exotel_passthru(
     params = dict(request.query_params)
     call_sid = _require_call_sid(params)
     direction = _param(params, "Direction", "direction") or "unknown"
-    inserted = await _record_event(collection, call_sid, "passthru", direction=direction)
+    inserted = await record_event(collection, call_sid, "passthru", direction=direction)
     return {
         "status": "received" if inserted else "duplicate",
         "provider": "exotel",
@@ -456,415 +325,23 @@ async def run_voicebot_stream(
         logger.warning("exotel_voicebot_session_rejected")
         await transport.close(status.WS_1008_POLICY_VIOLATION)
         return
-    intake_call_id = UUID(str(intake_call["id"]))
 
     await transport.accept()
-    stream_sid: str | None = None
-    stt_session: StreamingSpeechToTextSession | None = None
-    language_workflow = LanguageSelectionWorkflow()
-    consent_workflow = ConsentWorkflow()
-    speech_lock = Lock()
-    selected_dialogue: ConsentDialogue | None = None
-    recording_provider: ObjectStorageProvider | None = None
-    recorder: ConsentGatedCallRecorder | None = None
-    recording_finalized = False
-    conversation: ConversationWorkflow | None = None
-    stream_started_at = monotonic()
-
-    async def speak(
-        text: str,
-        *,
-        language_code: str | None = None,
-        speaker: str | None = None,
-    ) -> None:
-        async with speech_lock:
-            tts_provider = _create_tts_provider(settings)
-            async for audio in tts_provider.stream(
-                text, language_code=language_code, speaker=speaker
-            ):
-                if recorder:
-                    recorder.append_agent_audio(audio.content)
-                await transport.send_audio(audio.content)
-            if consent_workflow.state == ConsentState.GRANTED and conversation:
-                received_ms = max(0, int((monotonic() - stream_started_at) * 1000))
-                agent_segment = TranscriptSegment(
-                    speaker=TranscriptSpeaker.AGENT,
-                    text_encrypted=encryptor.encrypt(text),
-                    started_at_ms=received_ms,
-                    ended_at_ms=received_ms,
-                    detected_language=language_code,
-                )
-                result = await intake_collection.update_one(
-                    {
-                        "voicebot_session_token_hash": session_token_hash,
-                        "disclosures.recording_consent": True,
-                        "disclosures.intake_consent": True,
-                    },
-                    {
-                        "$push": {
-                            "intake.transcript_segments": agent_segment.model_dump(mode="json")
-                        },
-                        "$set": {"updated_at": datetime.now(UTC)},
-                    },
-                )
-                if result.matched_count != 1:
-                    raise RuntimeError("Could not save the consented agent transcript")
-
-    async def on_transcript(event_type: str, transcript: str, language: str | None) -> None:
-        nonlocal conversation, recording_provider, recorder, selected_dialogue
-        logger.info(
-            "sarvam_stt_transcript_received stream_sid=%s event=%s language=%s characters=%d",
-            stream_sid,
-            event_type,
-            language or "unknown",
-            len(transcript),
-        )
-        if event_type != "transcript.final":
-            return
-        if language_workflow.state == LanguageSelectionState.AWAITING_SELECTION:
-            action = language_workflow.handle_response(transcript)
-            if action == LanguageSelectionAction.REPROMPT_LANGUAGE:
-                await _record_voicebot_session_event(
-                    collection, stream_sid, "voicebot_reprompt_language"
-                )
-                await speak(
-                    LANGUAGE_SELECTION_REPROMPT,
-                    language_code="en-IN",
-                    speaker=_speaker_for_language(settings, LanguageChoice.ENGLISH),
-                )
-                await speak(
-                    HINDI_LANGUAGE_SELECTION_REPROMPT,
-                    language_code="hi-IN",
-                    speaker=_speaker_for_language(settings, LanguageChoice.HINDI),
-                )
-                return
-            if action == LanguageSelectionAction.CLOSE_CALL:
-                await _record_voicebot_session_event(collection, stream_sid, "voicebot_close_call")
-                await _update_voicebot_intake_call(
-                    intake_collection,
-                    session_token_hash,
-                    status=CallStatus.ABANDONED.value,
-                )
-                await speak(
-                    LANGUAGE_SELECTION_UNCLEAR_CLOSURE,
-                    language_code="en-IN",
-                    speaker=_speaker_for_language(settings, LanguageChoice.ENGLISH),
-                )
-                await speak(
-                    HINDI_LANGUAGE_SELECTION_UNCLEAR_CLOSURE,
-                    language_code="hi-IN",
-                    speaker=_speaker_for_language(settings, LanguageChoice.HINDI),
-                )
-                return
-
-            selected_language = language_workflow.selected_language
-            if selected_language is None:
-                raise RuntimeError("Language selection completed without a selected language")
-            selected_dialogue = get_consent_dialogue(selected_language)
-            await _record_voicebot_session_event(
-                collection,
-                stream_sid,
-                "voicebot_language_selected",
-                language=selected_language,
-            )
-            await _update_voicebot_intake_call(
-                intake_collection,
-                session_token_hash,
-                **{
-                    "language.preferred": selected_language.value,
-                    "disclosures.recording_disclosure_given_at": datetime.now(UTC),
-                    "disclosures.no_advice_disclosure_given_at": datetime.now(UTC),
-                    "disclosures.no_engagement_disclosure_given_at": datetime.now(UTC),
-                },
-            )
-            consent_workflow.begin()
-            await speak(
-                selected_dialogue.prompt,
-                language_code=selected_dialogue.language_code,
-                speaker=_speaker_for_language(settings, selected_language),
-            )
-            return
-        if consent_workflow.state == ConsentState.GRANTED and conversation:
-            if conversation.finished:
-                return
-            # Sarvam's current callback has no segment timing or confidence. Record the
-            # receipt time instead of inventing a speech duration or confidence score.
-            received_ms = max(0, int((monotonic() - stream_started_at) * 1000))
-            segment = TranscriptSegment(
-                speaker=TranscriptSpeaker.CALLER,
-                text_encrypted=encryptor.encrypt(transcript),
-                started_at_ms=received_ms,
-                ended_at_ms=received_ms,
-                detected_language=language,
-            )
-            result = await intake_collection.update_one(
-                {
-                    "voicebot_session_token_hash": session_token_hash,
-                    "disclosures.recording_consent": True,
-                    "disclosures.intake_consent": True,
-                },
-                {
-                    "$push": {"intake.transcript_segments": segment.model_dump(mode="json")},
-                    "$set": {"updated_at": datetime.now(UTC)},
-                },
-            )
-            if result.matched_count != 1:
-                logger.error("voicebot_transcript_consent_or_session_not_matched")
-                await transport.close(status.WS_1011_INTERNAL_ERROR)
-                return
-            try:
-                conversation_reply = await conversation.handle_response(transcript)
-            except ConversationUnavailable:
-                conversation.finished = True
-                await _record_voicebot_session_event(
-                    collection, stream_sid, "voicebot_conversation_unavailable"
-                )
-                await _update_voicebot_intake_call(
-                    intake_collection, session_token_hash, status=CallStatus.ABANDONED.value
-                )
-                await speak(
-                    CONVERSATION_UNAVAILABLE[conversation.language],
-                    language_code=selected_dialogue.language_code,
-                    speaker=_speaker_for_language(settings, conversation.language),
-                )
-                return
-            await speak(
-                conversation_reply.reply,
-                language_code=selected_dialogue.language_code,
-                speaker=_speaker_for_language(settings, conversation.language),
-            )
-            if conversation.finished:
-                await _update_voicebot_intake_call(
-                    intake_collection, session_token_hash, status=CallStatus.COMPLETED.value
-                )
-            return
-        if consent_workflow.state != ConsentState.AWAITING_CONSENT:
-            logger.info(
-                "consent_transcript_ignored stream_sid=%s state=%s",
-                stream_sid,
-                consent_workflow.state,
-            )
-            return
-
-        action = consent_workflow.handle_response(transcript)
-        if selected_dialogue is None:
-            raise RuntimeError("Consent response received without a selected language")
-        response = {
-            ConsentAction.REPROMPT_CONSENT: selected_dialogue.reprompt,
-            ConsentAction.CONSENT_GRANTED: selected_dialogue.granted_response,
-            ConsentAction.CONSENT_DECLINED: selected_dialogue.declined_response,
-            ConsentAction.CLOSE_CALL: selected_dialogue.unclear_closure,
-        }[action]
-        await _record_voicebot_session_event(collection, stream_sid, f"voicebot_{action}")
-        if action == ConsentAction.CONSENT_GRANTED:
-            consent_value: bool | None = True
-            call_status = CallStatus.IN_PROGRESS
-        elif action == ConsentAction.CONSENT_DECLINED:
-            consent_value = False
-            call_status = CallStatus.CONSENT_DECLINED
-        elif action == ConsentAction.CLOSE_CALL:
-            consent_value = None
-            call_status = CallStatus.ABANDONED
-        else:
-            consent_value = None
-            call_status = None
-        if call_status:
-            consent_fields: dict[str, object] = {"status": call_status.value}
-            if consent_value is not None:
-                consent_fields.update(
-                    {
-                        "disclosures.recording_consent": consent_value,
-                        "disclosures.recording_consent_at": datetime.now(UTC),
-                        "disclosures.intake_consent": consent_value,
-                        "disclosures.intake_consent_at": datetime.now(UTC),
-                    }
-                )
-            await _update_voicebot_intake_call(
-                intake_collection, session_token_hash, **consent_fields
-            )
-            if consent_value is not None:
-                await record_audit_event(
-                    audit_collection,
-                    intake_call_id=intake_call_id,
-                    event_type=IntakeAuditEventType.CONSENT_RECORDED,
-                    details={"intake_consent": consent_value},
-                )
-            if (
-                action == ConsentAction.CONSENT_GRANTED
-                and settings.object_storage_provider == "gcs"
-            ):
-                try:
-                    recording_provider = _create_object_storage_provider(settings)
-                    recorder = ConsentGatedCallRecorder(settings.sarvam_stt_sample_rate)
-                    await _update_voicebot_intake_call(
-                        intake_collection,
-                        session_token_hash,
-                        **{"disclosures.recording_started_at": datetime.now(UTC)},
-                    )
-                    await _record_voicebot_session_event(
-                        collection, stream_sid, "voicebot_recording_started"
-                    )
-                except (OSError, ValueError):
-                    logger.exception("voicebot_recording_start_failed stream_sid=%s", stream_sid)
-                    await _record_voicebot_session_event(
-                        collection, stream_sid, "voicebot_recording_start_failed"
-                    )
-        try:
-            if action == ConsentAction.CONSENT_GRANTED:
-                try:
-                    conversation = ConversationWorkflow(
-                        language_workflow.selected_language, _create_conversation_provider(settings)
-                    )
-                    await speak(
-                        response,
-                        language_code=selected_dialogue.language_code,
-                        speaker=_speaker_for_language(settings, conversation.language),
-                    )
-                    first_reply = await conversation.begin()
-                    response = first_reply.reply
-                except ConversationUnavailable:
-                    if conversation:
-                        conversation.finished = True
-                    await _record_voicebot_session_event(
-                        collection, stream_sid, "voicebot_conversation_unavailable"
-                    )
-                    await _update_voicebot_intake_call(
-                        intake_collection, session_token_hash, status=CallStatus.ABANDONED.value
-                    )
-                    response = CONVERSATION_UNAVAILABLE[language_workflow.selected_language]
-            await speak(
-                response,
-                language_code=selected_dialogue.language_code,
-                speaker=_speaker_for_language(settings, language_workflow.selected_language),
-            )
-        except (OSError, ValueError):
-            logger.exception(
-                "sarvam_tts_response_failed stream_sid=%s action=%s", stream_sid, action
-            )
-            await _record_voicebot_session_event(
-                collection, stream_sid, "voicebot_tts_response_failed"
-            )
-            await transport.close(status.WS_1011_INTERNAL_ERROR)
-            return
-
-    async def speak_consent_prompt() -> None:
-        if language_workflow.begin() != LanguageSelectionAction.REQUEST_LANGUAGE:
-            return
-        await speak(
-            LANGUAGE_SELECTION_PROMPT,
-            language_code="en-IN",
-            speaker=_speaker_for_language(settings, LanguageChoice.ENGLISH),
-        )
-        await speak(
-            HINDI_LANGUAGE_SELECTION_PROMPT,
-            language_code="hi-IN",
-            speaker=_speaker_for_language(settings, LanguageChoice.HINDI),
-        )
-
-    async def finalize_recording() -> None:
-        nonlocal recording_finalized
-        if recording_finalized or not recording_provider or not recorder:
-            return
-        recording_finalized = True
-        stored_any_track = False
-        for track in recorder.to_wav_tracks():
-            try:
-                stored_object = await recording_provider.store(
-                    intake_call_id,
-                    track.filename,
-                    track.content,
-                    "audio/wav",
-                )
-                artifact = ProtectedObjectReference(
-                    kind=ArtifactKind.CALL_RECORDING,
-                    storage_provider="gcs",
-                    storage_key=stored_object.key,
-                    content_type=stored_object.content_type,
-                )
-                if await _attach_voicebot_recording_artifact(
-                    intake_collection, session_token_hash, artifact
-                ):
-                    stored_any_track = True
-                    await record_audit_event(
-                        audit_collection,
-                        intake_call_id=intake_call_id,
-                        event_type=IntakeAuditEventType.ARTIFACT_ATTACHED,
-                        details={"artifact_kind": artifact.kind.value},
-                    )
-                    await _record_voicebot_session_event(
-                        collection, stream_sid, "voicebot_recording_stored", track=track.filename
-                    )
-            except (OSError, ValueError):
-                logger.exception("voicebot_recording_store_failed stream_sid=%s", stream_sid)
-                await _record_voicebot_session_event(
-                    collection, stream_sid, "voicebot_recording_store_failed", track=track.filename
-                )
-        if stored_any_track:
-            await _update_voicebot_intake_call(
-                intake_collection,
-                session_token_hash,
-                **{"disclosures.recording_stopped_at": datetime.now(UTC)},
-            )
-
-    try:
-        while True:
-            event = await transport.recv()
-            if isinstance(event, Start):
-                stream_sid = event.stream_sid
-                logger.info("exotel_voicebot_stream_started stream_sid=%s", stream_sid)
-                await _record_voicebot_session_event(
-                    collection, stream_sid, "voicebot_stream_started"
-                )
-                try:
-                    stt_session = _create_stt_session(settings, on_transcript)
-                    await stt_session.start()
-                    await _update_voicebot_intake_call(
-                        intake_collection,
-                        session_token_hash,
-                        **{"disclosures.ai_identity_given_at": datetime.now(UTC)},
-                    )
-                    await speak_consent_prompt()
-                except (OSError, ValueError):
-                    logger.exception("voicebot_session_start_failed stream_sid=%s", stream_sid)
-                    await _record_voicebot_session_event(
-                        collection, stream_sid, "voicebot_stt_start_failed"
-                    )
-                    await transport.close(status.WS_1011_INTERNAL_ERROR)
-                    return
-            elif isinstance(event, Audio):
-                payload = event.payload
-                if recorder:
-                    try:
-                        recorder.append_caller_payload(payload)
-                    except ValueError:
-                        logger.warning("voicebot_recording_invalid_audio stream_sid=%s", stream_sid)
-                if stt_session and (
-                    language_workflow.state == LanguageSelectionState.AWAITING_SELECTION
-                    or consent_workflow.state == ConsentState.AWAITING_CONSENT
-                    or (
-                        consent_workflow.state == ConsentState.GRANTED
-                        and conversation is not None
-                        and not conversation.finished
-                    )
-                ):
-                    await stt_session.send_audio(payload)
-            elif isinstance(event, Stop):
-                logger.info("exotel_voicebot_stream_stopped stream_sid=%s", stream_sid)
-                await _record_voicebot_session_event(
-                    collection, stream_sid, "voicebot_stream_stopped"
-                )
-                if stt_session:
-                    await stt_session.stop()
-                await finalize_recording()
-                await transport.close()
-                return
-    except WebSocketDisconnect:
-        logger.info("exotel_voicebot_stream_disconnected stream_sid=%s", stream_sid)
-        await _record_voicebot_session_event(collection, stream_sid, "voicebot_stream_disconnected")
-    finally:
-        if stt_session:
-            await stt_session.stop()
-        await finalize_recording()
+    # Factories are looked up here, at call time, so they stay swappable on this module.
+    await Session(
+        transport,
+        settings=settings,
+        collection=collection,
+        intake_collection=intake_collection,
+        audit_collection=audit_collection,
+        encryptor=encryptor,
+        session_token_hash=session_token_hash,
+        intake_call_id=UUID(str(intake_call["id"])),
+        create_stt=_create_stt_session,
+        create_tts=_create_tts_provider,
+        create_conversation=_create_conversation_provider,
+        create_storage=_create_object_storage_provider,
+    ).run()
 
 
 @router.api_route("/exotel/status", methods=["GET", "POST"], status_code=status.HTTP_200_OK)
@@ -883,7 +360,7 @@ async def exotel_status(
     recording_available = _recording_available(params)
     if recording_available is not None:
         fields["recording_available"] = recording_available
-    inserted = await _record_event(collection, call_sid, "status", **fields)
+    inserted = await record_event(collection, call_sid, "status", **fields)
     return {
         "status": "received" if inserted else "duplicate",
         "provider": "exotel",
