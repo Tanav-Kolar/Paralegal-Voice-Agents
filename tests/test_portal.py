@@ -161,7 +161,8 @@ class Calls:
                 return self
 
             async def to_list(self, length):
-                if query.get("telephony.provider", self_document["telephony"]["provider"]) != self_document["telephony"]["provider"]:
+                provider = self_document["telephony"]["provider"]
+                if query.get("telephony.provider", provider) != provider:
                     return []
                 return [deepcopy(self_document)]
 
