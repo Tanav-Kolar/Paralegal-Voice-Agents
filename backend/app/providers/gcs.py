@@ -5,7 +5,6 @@ from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
 
-from google.auth.transport.requests import Request
 from google.cloud import storage
 
 from app.core.config import Settings
@@ -20,12 +19,10 @@ class GoogleCloudStorageProvider:
         bucket_name: str,
         signed_url_ttl_minutes: int,
         client: storage.Client,
-        signing_service_account_email: str = "",
     ) -> None:
         self._bucket_name = bucket_name
         self._signed_url_ttl = timedelta(minutes=signed_url_ttl_minutes)
         self._client = client
-        self._signing_service_account_email = signing_service_account_email
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "GoogleCloudStorageProvider":
@@ -49,7 +46,6 @@ class GoogleCloudStorageProvider:
             bucket_name=settings.gcs_bucket_name,
             signed_url_ttl_minutes=settings.gcs_signed_url_ttl_minutes,
             client=client,
-            signing_service_account_email=settings.gcs_signing_service_account_email,
         )
 
     async def store(
@@ -71,6 +67,12 @@ class GoogleCloudStorageProvider:
             raise ValueError("Storage key is invalid")
         return await asyncio.to_thread(self._signed_download_url, key, filename)
 
+    async def load(self, key: str) -> bytes:
+        if not key or key.startswith("/") or ".." in Path(key).parts:
+            raise ValueError("Storage key is invalid")
+        blob = self._client.bucket(self._bucket_name).blob(key)
+        return await asyncio.to_thread(blob.download_as_bytes)
+
     def _upload(self, key: str, content: bytes, content_type: str) -> None:
         blob = self._client.bucket(self._bucket_name).blob(key)
         blob.upload_from_string(content, content_type=content_type)
@@ -78,19 +80,9 @@ class GoogleCloudStorageProvider:
     def _signed_download_url(self, key: str, filename: str | None = None) -> str:
         blob = self._client.bucket(self._bucket_name).blob(key)
         disposition = f'attachment; filename="{Path(filename).name}"' if filename else None
-        signing_options = {}
-        if self._signing_service_account_email:
-            credentials = self._client._credentials
-            if not credentials.valid:
-                credentials.refresh(Request())
-            signing_options = {
-                "service_account_email": self._signing_service_account_email,
-                "access_token": credentials.token,
-            }
         return blob.generate_signed_url(
             version="v4",
             expiration=self._signed_url_ttl,
             method="GET",
             response_disposition=disposition,
-            **signing_options,
         )

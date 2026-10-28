@@ -22,6 +22,9 @@ class FakeBlob:
         assert kwargs["method"] == "GET"
         return f"https://storage.example.test/{self.key}?signature=temporary"
 
+    def download_as_bytes(self) -> bytes:
+        return b"stored-object"
+
 
 class FakeBucket:
     def __init__(self) -> None:
@@ -34,15 +37,9 @@ class FakeBucket:
 class FakeStorageClient:
     def __init__(self) -> None:
         self.buckets: dict[str, FakeBucket] = {}
-        self._credentials = FakeCredentials()
 
     def bucket(self, name: str) -> FakeBucket:
         return self.buckets.setdefault(name, FakeBucket())
-
-
-class FakeCredentials:
-    valid = True
-    token = "runtime-access-token"
 
 
 @pytest.mark.asyncio
@@ -90,20 +87,12 @@ def test_gcs_provider_uses_application_default_credentials_without_key_file() ->
 
 
 @pytest.mark.asyncio
-async def test_gcs_provider_signs_with_cloud_run_identity() -> None:
+async def test_gcs_provider_reads_private_object_for_authenticated_playback() -> None:
     client = FakeStorageClient()
-    provider = GoogleCloudStorageProvider(
-        "demo-private-bucket",
-        10,
-        client,  # type: ignore[arg-type]
-        signing_service_account_email="runtime@example.test",
-    )
+    provider = GoogleCloudStorageProvider("demo-private-bucket", 10, client)  # type: ignore[arg-type]
 
-    await provider.create_download_url("intake-calls/call/recording.wav")
+    content = await provider.load("intake-calls/call/recording.wav")
 
-    options = client.bucket("demo-private-bucket").blobs[
-        "intake-calls/call/recording.wav"
-    ].signed_url_options
-    assert options is not None
-    assert options["service_account_email"] == "runtime@example.test"
-    assert options["access_token"] == "runtime-access-token"
+    assert content == b"stored-object"
+    with pytest.raises(ValueError, match="Storage key is invalid"):
+        await provider.load("../recording.wav")

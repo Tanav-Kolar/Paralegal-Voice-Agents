@@ -47,7 +47,6 @@ class Settings(BaseSettings):
     gcs_project_id: str = ""
     gcs_bucket_name: str = ""
     gcs_service_account_key_path: str = ""
-    gcs_signing_service_account_email: str = ""
     gcs_signed_url_ttl_minutes: int = Field(default=10, ge=1, le=60)
     local_review_api_enabled: bool = False
     voice_barge_in_enabled: bool = True

@@ -6,7 +6,8 @@ from pathlib import PurePosixPath
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import Response
+from google.api_core.exceptions import GoogleAPICallError
 from pydantic import BaseModel, Field
 
 from app.core.config import Settings, get_settings
@@ -252,15 +253,15 @@ async def list_local_review_calls(
 
 
 @router.get("/intake-calls/{intake_call_id}/recordings/{artifact_index}/playback")
-async def redirect_to_local_recording(
+async def stream_recording(
     request: Request,
     intake_call_id: UUID,
     artifact_index: int,
     scope: dict = Depends(review_scope),
     settings: Settings = Depends(get_settings),
     collection=Depends(get_intake_calls_collection),
-) -> RedirectResponse:
-    """Issue a short-lived private-object URL for a playback request."""
+) -> Response:
+    """Serve a consented recording through the authenticated review endpoint."""
     if artifact_index < 0:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recording not found")
     _, document = await _find_call(
@@ -282,13 +283,13 @@ async def redirect_to_local_recording(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recording not found")
     try:
         storage_provider = _create_object_storage_provider(settings)
-        download_url = await storage_provider.create_download_url(artifact["storage_key"])
-    except (KeyError, OSError, ValueError) as error:
+        audio = await storage_provider.load(artifact["storage_key"])
+    except (GoogleAPICallError, KeyError, OSError, ValueError) as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Recording playback is unavailable",
         ) from error
-    return RedirectResponse(download_url)
+    return Response(audio, media_type="audio/wav", headers={"Cache-Control": "private, no-store"})
 
 
 class ReviewUpdate(BaseModel):
@@ -500,7 +501,7 @@ async def download_report(
     user: dict = Depends(current_user),
     settings: Settings = Depends(get_settings),
     collection=Depends(get_intake_calls_collection),
-) -> RedirectResponse:
+) -> Response:
     _, document = await _find_call(
         request, settings, collection, {"id": str(intake_call_id)}, {"intake.reports": 1}
     )
@@ -518,11 +519,16 @@ async def download_report(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Report not found")
     try:
         storage = _create_object_storage_provider(settings)
-        url = await storage.create_download_url(
-            report["artifact"]["storage_key"], filename=f"intake-brief-v{version}.pdf"
-        )
-    except (OSError, ValueError, KeyError) as error:
+        pdf = await storage.load(report["artifact"]["storage_key"])
+    except (GoogleAPICallError, OSError, ValueError, KeyError) as error:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE, "PDF download is unavailable"
         ) from error
-    return RedirectResponse(url)
+    return Response(
+        pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="intake-brief-v{version}.pdf"',
+            "Cache-Control": "private, no-store",
+        },
+    )

@@ -52,8 +52,9 @@ class FakeIntakeCallsCollection:
 
 
 class FakeStorageProvider:
-    async def create_download_url(self, key: str) -> str:
-        return f"https://storage.example.test/{key}?signature=temporary"
+    async def load(self, key: str) -> bytes:
+        assert key.startswith("intake-calls/")
+        return b"recording-audio"
 
 
 def make_client(
@@ -125,7 +126,7 @@ def test_local_review_api_lists_masked_calls_newest_first() -> None:
     assert calls[1]["recordings"] == [{"index": 0, "label": "Call"}]
 
 
-def test_local_review_api_redirects_to_signed_recording_url(monkeypatch) -> None:
+def test_local_review_api_serves_authenticated_recording(monkeypatch) -> None:
     monkeypatch.setattr(
         review_api,
         "_create_object_storage_provider",
@@ -140,8 +141,9 @@ def test_local_review_api_redirects_to_signed_recording_url(monkeypatch) -> None
             follow_redirects=False,
         )
 
-    assert response.status_code == 307
-    assert response.headers["location"].startswith("https://storage.example.test/intake-calls/")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/wav"
+    assert response.content == b"recording-audio"
 
 
 def test_local_review_api_is_unavailable_in_production() -> None:

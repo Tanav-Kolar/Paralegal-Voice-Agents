@@ -193,6 +193,9 @@ class Storage:
         assert filename and filename.endswith(".pdf")
         return f"https://storage.example/{key}"
 
+    async def load(self, key):
+        return self.pdfs[key.rsplit("/", 1)[-1]]
+
 
 def setup(monkeypatch):
     key = Fernet.generate_key().decode()
@@ -284,7 +287,10 @@ def test_portal_sign_in_review_and_versioned_pdf(monkeypatch):
             1,
             2,
         ]
-        assert client.get(path + "/reports/1/download", follow_redirects=False).status_code == 307
+        download = client.get(path + "/reports/1/download")
+        assert download.status_code == 200
+        assert download.headers["content-type"] == "application/pdf"
+        assert download.content == storage.pdfs["brief-v1.pdf"]
         assert client.post("/api/v1/portal/logout").status_code == 200
         assert client.get(path).status_code == 401
     pdf = PdfReader(BytesIO(storage.pdfs["brief-v1.pdf"]))

@@ -22,7 +22,7 @@ does not classify legal merits or infer missing facts. Manually corrected facts 
 Fact Sheet and are not attributed to a transcript line.
 
 Briefs are generated from the summary and fact sheet, saved privately in GCS as separate versions,
-and downloaded through a short-lived signed URL. Each PDF retains its unverified-facts and
+and downloaded through the authenticated portal API. Each PDF retains its unverified-facts and
 no-advice disclaimer. The portal does not display that disclaimer in the case workspace.
 
 Historical stream events are grouped into expandable call sessions in the separate **Call sessions**
