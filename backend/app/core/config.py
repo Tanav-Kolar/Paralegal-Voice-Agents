@@ -49,10 +49,9 @@ class Settings(BaseSettings):
     gcs_service_account_key_path: str = ""
     gcs_signed_url_ttl_minutes: int = Field(default=10, ge=1, le=60)
     local_review_api_enabled: bool = False
-    # Off by default: without echo cancellation, line echo of the agent can interrupt it.
-    voice_barge_in_enabled: bool = False
-    # The browser requests echo cancellation, so interruption is enabled for demo calls.
-    demo_barge_in_enabled: bool = True
+    voice_barge_in_enabled: bool = True
+    # Browser speakers can leak agent speech into the microphone and saved recording.
+    demo_barge_in_enabled: bool = False
     demo_mode_enabled: bool = False
     demo_access_code: str = ""
     access_cookie_secret: str = ""

@@ -798,6 +798,8 @@ def test_outbound_audio_frames_are_sample_aligned(monkeypatch) -> None:
             ws.send_json({"event": "start", "start": {"stream_sid": "s1"}})
             frames = [b64decode(ws.receive_json()["media"]["payload"]) for _ in range(2)]
             ws.send_json({"event": "stop"})
+            while ws.receive()["type"] != "websocket.close":
+                pass
     assert frames == [b"ab", b"cdef"]
 
 
@@ -867,8 +869,39 @@ def test_barge_in_stops_the_agent_and_clears_buffered_audio(monkeypatch) -> None
             ws.send_json({"event": "stop"})
             assert ws.receive()["type"] == "websocket.close"
     # The Hindi half of the opening prompt is dropped along with the interrupted English half.
-    assert len(streamed) == 1
+    assert streamed[0] == LANGUAGE_SELECTION_PROMPT
+    assert HINDI_LANGUAGE_SELECTION_PROMPT not in streamed
     assert any(e["event_type"] == "voicebot_agent_interrupted" for e in events.documents)
+
+
+def test_final_transcript_also_interrupts_agent(monkeypatch) -> None:
+    client, events, stt_sessions, streamed = _slow_tts_with_barge_in(monkeypatch, barge_in=True)
+    with client, _stream(client, "final-barge-in", "s1") as ws:
+        ws.send_json({"event": "start", "start": {"stream_sid": "s1"}})
+        assert ws.receive_json()["event"] == "media"
+        stt_sessions[0].transcript_on_next_audio = ("transcript.final", "English", "en-IN")
+        ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
+        assert ws.receive_json() == {"event": "clear", "stream_sid": "s1"}
+        ws.send_json({"event": "stop"})
+        while ws.receive()["type"] != "websocket.close":
+            pass
+    assert streamed[0] == LANGUAGE_SELECTION_PROMPT
+    assert HINDI_LANGUAGE_SELECTION_PROMPT not in streamed
+    assert any(e["event_type"] == "voicebot_agent_interrupted" for e in events.documents)
+
+
+def test_agent_echo_does_not_trigger_barge_in(monkeypatch) -> None:
+    client, events, stt_sessions, _ = _slow_tts_with_barge_in(monkeypatch, barge_in=True)
+    with client, _stream(client, "agent-echo", "s1") as ws:
+        ws.send_json({"event": "start", "start": {"stream_sid": "s1"}})
+        assert ws.receive_json()["event"] == "media"
+        stt_sessions[0].transcript_on_next_audio = (
+            "transcript.partial", "To speak in English", "en-IN"
+        )
+        ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
+        ws.send_json({"event": "stop"})
+        assert ws.receive()["type"] == "websocket.close"
+    assert not any(e["event_type"] == "voicebot_agent_interrupted" for e in events.documents)
 
 
 def test_partial_transcripts_do_not_interrupt_when_barge_in_is_off(monkeypatch) -> None:

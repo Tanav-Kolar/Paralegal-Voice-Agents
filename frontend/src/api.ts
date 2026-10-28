@@ -7,6 +7,7 @@ export type IntakeCall = {
   id: string;
   status: string;
   callerPhoneMasked: string;
+  callerName?: string | null;
   receivedAt: string | null;
   recordingConsent: boolean;
   recordings: Recording[];
@@ -63,7 +64,7 @@ export type TriageSummary = {
   overview: string;
   contentUnavailable: boolean;
   callerStatements: { id: string; text: string }[];
-  facts: { field: string; value: string | null; notProvided: boolean; sourceIds: string[] }[];
+  facts: { field: string; value: string | null; providedByCaller?: boolean; notProvided: boolean; sourceIds: string[] }[];
   disclaimer: string;
 };
 export type CallDetail = {

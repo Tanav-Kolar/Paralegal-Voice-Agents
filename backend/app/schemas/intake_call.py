@@ -179,6 +179,7 @@ class LawyerReviewInput(BaseModel):
 
 class IntakeDetails(BaseModel):
     matter_type: str | None = Field(default=None, max_length=80)
+    triage_summary_encrypted: str | None = None
     parties: list[Party] = Field(default_factory=list)
     facts: list[CaseFact] = Field(default_factory=list)
     transcript_segments: list[TranscriptSegment] = Field(default_factory=list)

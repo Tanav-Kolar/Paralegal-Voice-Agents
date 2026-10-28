@@ -12,7 +12,7 @@ type Handlers = {
   onLevel: (level: number) => void;
   onAgentLevel: (level: number) => void;
   onAgentSpeaking: (speaking: boolean) => void;
-  onTranscript: (speaker: "agent" | "caller", text: string) => void;
+  onTranscript: (speaker: "agent" | "caller", text: string, update?: boolean) => void;
 };
 
 export class VoiceCall {
@@ -29,6 +29,9 @@ export class VoiceCall {
   private playing = new Set<AudioBufferSourceNode>();
   private speakingTimer: number | null = null;
   private closing = false;
+  private agentText = "";
+  private agentTextSeconds = 0;
+  private agentWordsShown = 0;
 
   constructor(private readonly handlers: Handlers) {}
 
@@ -111,7 +114,20 @@ export class VoiceCall {
         "text" in event &&
         typeof event.text === "string"
       ) {
-        this.handlers.onTranscript(event.speaker, event.text);
+        if (event.speaker === "agent") {
+          this.agentText = event.text;
+          this.agentTextSeconds = 0;
+          this.agentWordsShown = 0;
+          this.handlers.onTranscript("agent", "");
+        } else {
+          this.handlers.onTranscript("caller", event.text);
+        }
+      } else if (
+        typeof event === "object" && event !== null && "type" in event &&
+        event.type === "agent_transcript_done"
+      ) {
+        this.handlers.onTranscript("agent", this.agentText, true);
+        this.agentText = "";
       }
     } catch {
       // Ignore unrelated textual control frames.
@@ -130,8 +146,7 @@ export class VoiceCall {
         this.count += 1;
         this.position += 1;
         if (this.position >= this.nextOutput) {
-          // Keep sending microphone audio during playback so the caller can interrupt.
-          // Browser echo cancellation limits the agent's audio entering this stream.
+          // The server gates demo microphone audio while the agent is speaking.
           this.pending.push(this.sum / this.count);
           this.sum = 0;
           this.count = 0;
@@ -167,6 +182,7 @@ export class VoiceCall {
     if (usable === 0) return;
     const pcm = new Int16Array(bytes.buffer.slice(0, usable));
     const buffer = context.createBuffer(1, pcm.length, SAMPLE_RATE);
+    this.advanceAgentText(buffer.duration);
     const channel = buffer.getChannelData(0);
     let peak = 0;
     for (let i = 0; i < pcm.length; i++) {
@@ -195,8 +211,20 @@ export class VoiceCall {
     this.playing.clear();
     this.leftoverByte = null;
     this.playHead = 0;
+    this.agentText = "";
     this.handlers.onAgentSpeaking(false);
     this.handlers.onAgentLevel(0);
+  }
+
+  private advanceAgentText(seconds: number): void {
+    if (!this.agentText) return;
+    this.agentTextSeconds += seconds;
+    const words = this.agentText.trim().split(/\s+/);
+    const shown = Math.min(words.length, Math.max(1, Math.floor(this.agentTextSeconds * 3)));
+    if (shown > this.agentWordsShown) {
+      this.agentWordsShown = shown;
+      this.handlers.onTranscript("agent", words.slice(0, shown).join(" "), true);
+    }
   }
 
   private agentIsSpeaking(context: AudioContext): boolean {

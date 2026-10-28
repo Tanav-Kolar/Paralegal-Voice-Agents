@@ -54,6 +54,10 @@ class Transport(Protocol):
         """Send a display-only final transcript item when the transport supports it."""
         ...
 
+    async def finish_agent_transcript(self) -> None:
+        """Tell a display that the current agent utterance finished playing."""
+        ...
+
     async def close(self, code: int | None = None) -> None: ...
 
 
@@ -104,6 +108,9 @@ class ExotelTransport:
         # Exotel has no display surface; transcripts are retained by Session after consent instead.
         return None
 
+    async def finish_agent_transcript(self) -> None:
+        return None
+
     async def close(self, code: int | None = None) -> None:
         if code is None:
             await self._websocket.close()
@@ -144,6 +151,9 @@ class BrowserTransport:
 
     async def send_transcript(self, speaker: str, text: str) -> None:
         await self._websocket.send_json({"type": "transcript", "speaker": speaker, "text": text})
+
+    async def finish_agent_transcript(self) -> None:
+        await self._websocket.send_json({"type": "agent_transcript_done"})
 
     async def close(self, code: int | None = None) -> None:
         if code is None:

@@ -55,6 +55,7 @@ def test_demo_session_streams_the_same_intake_pipeline() -> None:
         with client.websocket_connect(session["streamPath"]) as websocket:
             assert websocket.receive_json()["type"] == "transcript"
             assert websocket.receive_bytes()
+            assert websocket.receive_json()["type"] == "agent_transcript_done"
             assert websocket.receive_json()["type"] == "transcript"
             websocket.receive_bytes()
             websocket.send_text("stop")

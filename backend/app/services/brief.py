@@ -12,6 +12,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import BaseDocTemplate, Frame, PageTemplate, Paragraph
 
 from app.security.field_encryption import FieldEncryptor
+from app.services.case_taxonomy import matter_type_from_call
 
 DISCLAIMER = (
     "AI-assisted intake summary for lawyer review only. Caller statements and extracted facts "
@@ -54,21 +55,44 @@ def triage(document: dict, encryptor: FieldEncryptor | None) -> dict:
             {
                 "field": fact.get("field_name", "Fact"),
                 "value": value,
+                "providedByCaller": fact.get("provided_by_caller", True),
                 "notProvided": bool(fact.get("not_provided")),
                 "sourceIds": [
                     str(value) for value in fact.get("source_transcript_segment_ids", [])
                 ],
             }
         )
+    encrypted_overview = intake.get("triage_summary_encrypted")
+    try:
+        overview = (
+            encryptor.decrypt(encrypted_overview) if encryptor and encrypted_overview else None
+        )
+    except ValueError:
+        overview = None
+    if encrypted_overview and overview is None:
+        content_unavailable = True
+    fact_values = {item["field"].casefold(): item["value"] for item in facts if item["value"]}
+    matter_type = matter_type_from_call(
+        intake.get("matter_type"),
+        fact_values.get("matter type"),
+        [item["text"] for item in statements],
+    )
+    if not overview:
+        timeline = fact_values.get("timeline of events")
+        help_wanted = fact_values.get("help the caller wants")
+        if timeline or help_wanted:
+            parts = []
+            if timeline:
+                parts.append(f"The caller described the following events: {timeline.rstrip('.')}.")
+            if help_wanted:
+                parts.append(f"The caller seeks help with {help_wanted.rstrip('.')}.")
+            overview = " ".join(parts)
+        else:
+            overview = "A triage summary is not available for this call."
     return {
-        "matterType": intake.get("matter_type"),
+        "matterType": matter_type,
         "language": document.get("language", {}).get("preferred"),
-        "overview": " ".join(item["text"] for item in statements[:3])
-        or (
-            "Encrypted caller content is unavailable with the configured key."
-            if content_unavailable
-            else "No caller statements were saved."
-        ),
+        "overview": overview,
         "contentUnavailable": content_unavailable,
         "callerStatements": statements,
         "facts": facts,
@@ -156,16 +180,8 @@ def render_brief(document: dict, summary: dict, version: int, firm_name: str) ->
         p(f"Matter: {summary['matterType'] or 'Not identified'}", "body"),
         p(f"Language: {summary['language'] or 'Not recorded'}", "body"),
         p(summary["overview"], "body"),
-        p("Caller statements", "heading"),
     ]
-    if summary["callerStatements"]:
-        story.extend(
-            p(f"{index}. {item['text']}")
-            for index, item in enumerate(summary["callerStatements"], 1)
-        )
-    else:
-        story.append(p("No caller statements were saved."))
-    story.append(p("Recorded facts", "heading"))
+    story.append(p("Case Fact Sheet", "heading"))
     if summary["facts"]:
         story.extend(
             p(f"{item['field'].replace('_', ' ')}: {item['value'] or 'Not provided'}")

@@ -142,6 +142,17 @@ class Calls:
     async def find_one(self, query, projection):
         return deepcopy(self.document) if query.get("id") == self.id else None
 
+    def find(self, query, projection):
+        class Cursor:
+            def sort(self, key, direction):
+                return self
+
+            async def to_list(self, length):
+                return [deepcopy(self_document)]
+
+        self_document = self.document
+        return Cursor()
+
     async def update_one(self, query, update):
         if query.get("id") != self.id:
             result = Result()
@@ -234,7 +245,8 @@ def test_portal_sign_in_review_and_versioned_pdf(monkeypatch):
         assert login.json()["role"] == "lawyer"
         detail = client.get(path).json()
         assert detail["summary"]["facts"][0]["value"] == "Delhi"
-        assert "मुझे" in detail["summary"]["overview"]
+        assert detail["summary"]["overview"] == "A triage summary is not available for this call."
+        assert detail["summary"]["matterType"] == "Other family matter"
         assert detail["transcript"] == [
             {
                 "id": detail["transcript"][0]["id"],
@@ -278,11 +290,37 @@ def test_portal_sign_in_review_and_versioned_pdf(monkeypatch):
     pdf = PdfReader(BytesIO(storage.pdfs["brief-v1.pdf"]))
     text = " ".join(page.extract_text() for page in pdf.pages)
     assert "Version 1" in text and "unverified" in text
+    assert "Case Fact Sheet" in text
     assert {event["event_type"] for event in audit.events} == {
         "review_status_changed",
         "review_notes_saved",
         "report_generated",
     }
+
+
+def test_portal_queue_shows_corrected_caller_name(monkeypatch):
+    client, users, calls, _audit, _storage, key = setup(monkeypatch)
+    monkeypatch.setattr(review_api, "get_portal_users_collection", lambda request: users)
+    calls.document["intake"]["facts"].append(
+        {
+            "field_name": "Caller name",
+            "value_encrypted": FieldEncryptor(key).encrypt("Asha Mehta"),
+            "provided_by_caller": False,
+            "not_provided": False,
+            "source_transcript_segment_ids": [],
+        }
+    )
+    with client:
+        client.post(
+            "/api/v1/portal/login",
+            json={"email": "lawyer@example.com", "password": "correct long password"},
+        )
+        queue = client.get("/api/v1/review/intake-calls").json()
+        detail = client.get(f"/api/v1/review/intake-calls/{calls.id}").json()
+    assert queue[0]["callerName"] == "Asha Mehta"
+    assert next(
+        fact for fact in detail["summary"]["facts"] if fact["field"] == "Caller name"
+    )["providedByCaller"] is False
 
 
 def test_reviewer_cannot_generate_brief(monkeypatch):

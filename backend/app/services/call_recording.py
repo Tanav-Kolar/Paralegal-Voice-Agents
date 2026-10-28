@@ -31,14 +31,16 @@ class ConsentGatedCallRecorder:
         self._clock = clock
         self._started_at = clock()
         self._mixed_pcm = bytearray()
+        self._caller_end = 0
+        self._agent_end = 0
 
     def append_caller_audio(self, pcm_audio: bytes) -> None:
         """Mix a caller Linear16 frame at its place in the call timeline."""
-        self._mix_at_current_time(pcm_audio)
+        self._caller_end = self._mix_at_current_time(pcm_audio, self._caller_end)
 
     def append_agent_audio(self, pcm_audio: bytes) -> None:
         """Mix an agent Linear16 frame at its place in the call timeline."""
-        self._mix_at_current_time(pcm_audio)
+        self._agent_end = self._mix_at_current_time(pcm_audio, self._agent_end)
 
     def to_wav_track(self) -> RecordedAudioTrack | None:
         """Return one standard mono WAV recording, or None when no audio was captured."""
@@ -49,12 +51,14 @@ class ConsentGatedCallRecorder:
             content=self._as_wav(bytes(self._mixed_pcm), self._sample_rate),
         )
 
-    def _mix_at_current_time(self, pcm_audio: bytes) -> None:
+    def _mix_at_current_time(self, pcm_audio: bytes, track_end: int) -> int:
         usable = len(pcm_audio) - len(pcm_audio) % 2
         if usable == 0:
-            return
+            return track_end
         offset_samples = max(0, int((self._clock() - self._started_at) * self._sample_rate))
-        offset = offset_samples * 2
+        # Chunks on one track must never overwrite earlier samples when the provider
+        # delivers audio faster than playback or several frames share one clock tick.
+        offset = max(offset_samples * 2, track_end)
         required = offset + usable
         if required > len(self._mixed_pcm):
             self._mixed_pcm.extend(b"\x00" * (required - len(self._mixed_pcm)))
@@ -66,6 +70,7 @@ class ConsentGatedCallRecorder:
             incoming = int.from_bytes(pcm_audio[index : index + 2], "little", signed=True)
             mixed = max(-32768, min(32767, existing + incoming))
             self._mixed_pcm[position : position + 2] = mixed.to_bytes(2, "little", signed=True)
+        return required
 
     @staticmethod
     def _as_wav(pcm_audio: bytes, sample_rate: int) -> bytes:

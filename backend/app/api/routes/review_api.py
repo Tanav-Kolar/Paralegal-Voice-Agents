@@ -189,6 +189,7 @@ async def list_local_review_calls(
     request: Request,
     scope: dict = Depends(review_scope),
     settings: Settings = Depends(get_settings),
+    encryptor: FieldEncryptor | None = Depends(get_optional_field_encryptor),
     collection=Depends(get_intake_calls_collection),
 ) -> list[dict[str, object]]:
     """List masked intake calls for review, newest first."""
@@ -204,12 +205,15 @@ async def list_local_review_calls(
                 "disclosures.recording_consent": 1,
                 "intake.artifacts": 1,
                 "intake.matter_type": 1,
+                "intake.facts": 1,
+                "intake.transcript_segments": 1,
                 "intake.reports": 1,
                 "lawyer_review.status": 1,
             },
         ).sort("telephony.started_at", -1)
         documents.extend(await cursor.to_list(length=None))
     calls: list[dict[str, object]] = []
+    named_portal_user = bool(session_email(settings, request.cookies.get(PORTAL_COOKIE)))
     for document in documents:
         call_id = document.get("id")
         if not call_id:
@@ -219,6 +223,15 @@ async def list_local_review_calls(
             for index, artifact in _recording_artifacts(document)
             if artifact.get("storage_key")
         ]
+        summary = triage(document, encryptor)
+        caller_name = next(
+            (
+                fact["value"]
+                for fact in summary["facts"]
+                if fact["field"].casefold() == "caller name" and fact["value"]
+            ),
+            None,
+        )
         calls.append(
             {
                 "id": str(call_id),
@@ -229,7 +242,8 @@ async def list_local_review_calls(
                 "receivedAt": _isoformat(document.get("telephony", {}).get("started_at")),
                 "recordingConsent": document.get("disclosures", {}).get("recording_consent", False),
                 "recordings": recordings,
-                "matterType": document.get("intake", {}).get("matter_type"),
+                "matterType": summary["matterType"],
+                "callerName": caller_name if named_portal_user else None,
                 "reviewStatus": document.get("lawyer_review", {}).get("status", "pending"),
                 "reportCount": len(document.get("intake", {}).get("reports", [])),
             }

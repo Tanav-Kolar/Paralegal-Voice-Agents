@@ -13,6 +13,7 @@ class IntakeAuditEventType(StrEnum):
     ARTIFACT_ATTACHED = "artifact_attached"
     REVIEW_STATUS_CHANGED = "review_status_changed"
     REVIEW_NOTES_SAVED = "review_notes_saved"
+    CASE_FACT_CORRECTED = "case_fact_corrected"
     REPORT_GENERATED = "report_generated"
 
 

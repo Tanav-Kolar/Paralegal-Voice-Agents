@@ -39,3 +39,17 @@ def test_call_recorder_mixes_overlapping_audio_and_requires_matching_rates() -> 
         assert "must match" in str(error)
     else:
         raise AssertionError("Expected mismatched sample rates to be rejected")
+
+
+def test_fast_chunks_on_same_track_keep_every_sample() -> None:
+    now = [0.0]
+    recorder = ConsentGatedCallRecorder(sample_rate=8000, clock=lambda: now[0])
+    recorder.append_agent_audio(b"\x01\x00\x02\x00")
+    recorder.append_agent_audio(b"\x03\x00\x04\x00")
+
+    track = recorder.to_wav_track()
+    assert track
+    with wave_open(BytesIO(track.content), "rb") as wav_file:
+        assert wav_file.readframes(wav_file.getnframes()) == (
+            b"\x01\x00\x02\x00\x03\x00\x04\x00"
+        )

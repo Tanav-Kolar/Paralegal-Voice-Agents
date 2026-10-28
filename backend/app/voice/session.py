@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from base64 import b64encode
 from collections.abc import Callable
 from contextlib import suppress
@@ -30,7 +31,7 @@ from app.security.field_encryption import FieldEncryptor
 from app.services.audit import record_audit_event
 from app.services.call_events import record_event
 from app.services.call_recording import ConsentGatedCallRecorder
-from app.services.extraction import extract_facts
+from app.services.extraction import extract_case
 from app.voice.transport import Audio, Start, Stop, Transport
 from app.workflows.consent import (
     ConsentAction,
@@ -175,9 +176,10 @@ class Session:
         self._turns: asyncio.Queue[tuple[str, str | None] | None] = asyncio.Queue()
         self._worker: asyncio.Task | None = None
         self._speech_task: asyncio.Task | None = None
+        self._current_speech_text = ""
+        self._agent_audio_until = 0.0
         self._turn_interrupted = False
         self._hung_up = False
-        self._sent_audio = False
         self.selected_dialogue: ConsentDialogue | None = None
         self.recording_provider: ObjectStorageProvider | None = None
         self.recorder: ConsentGatedCallRecorder | None = None
@@ -206,8 +208,8 @@ class Session:
         if self._turn_interrupted or self._hung_up:
             return
         async with self.speech_lock:
-            self._sent_audio = False
             await self.transport.send_transcript("agent", text)
+            self._current_speech_text = text
             self._speech_task = asyncio.create_task(
                 self._stream_speech(text, language_code, speaker)
             )
@@ -219,8 +221,10 @@ class Session:
                     raise
             finally:
                 self._speech_task = None
-            if self._turn_interrupted and not self._sent_audio:
+                self._current_speech_text = ""
+            if self._turn_interrupted or self._hung_up:
                 return
+            await self.transport.finish_agent_transcript()
             await self._save_agent_segment(text, language_code)
 
     async def _stream_speech(
@@ -228,6 +232,8 @@ class Session:
     ) -> None:
         tts_provider = self._create_tts(self.settings)
         leftover = b""
+        frame_bytes = self.settings.sarvam_tts_sample_rate * 2 // 50  # 20 ms
+        next_frame_at = monotonic()
         async for audio in tts_provider.stream(text, language_code=language_code, speaker=speaker):
             # Keep every frame sample-aligned; a split 16-bit sample plays as static.
             chunk = leftover + audio.content
@@ -235,10 +241,20 @@ class Session:
             chunk, leftover = chunk[:usable], chunk[usable:]
             if not chunk:
                 continue
-            if self.recorder:
-                self.recorder.append_agent_audio(chunk)
-            await self.transport.send_audio(chunk)
-            self._sent_audio = True
+            for offset in range(0, len(chunk), frame_bytes):
+                delay = next_frame_at - monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                frame = chunk[offset : offset + frame_bytes]
+                await self.transport.send_audio(frame)
+                if self.recorder:
+                    self.recorder.append_agent_audio(frame)
+                self._agent_audio_until = monotonic() + len(frame) / (
+                    self.settings.sarvam_tts_sample_rate * 2
+                ) + 0.25
+                next_frame_at = max(next_frame_at, monotonic()) + len(frame) / (
+                    self.settings.sarvam_tts_sample_rate * 2
+                )
 
     async def _save_agent_segment(self, text: str, language_code: str | None) -> None:
         if self.consent_workflow.state != ConsentState.GRANTED or not self.conversation:
@@ -280,9 +296,17 @@ class Session:
             if self.transport.provider == "demo"
             else self.settings.voice_barge_in_enabled
         )
-        if event_type == "transcript.partial" and barge_in_enabled:
+        if self._demo_agent_audio_active():
+            return
+        # The far end can feed a delayed copy of the agent's own voice to STT.
+        # Ignore clear multiword matches, while allowing short answers such as "yes".
+        heard = re.sub(r"\W+", " ", transcript.casefold()).strip()
+        spoken = re.sub(r"\W+", " ", self._current_speech_text.casefold()).strip()
+        if self._speech_task and len(heard) >= 12 and heard in spoken:
+            return
+        if event_type in {"transcript.partial", "transcript.final"} and barge_in_enabled:
             await self._interrupt_speech()
-        elif event_type == "transcript.final":
+        if event_type == "transcript.final":
             await self.transport.send_transcript("caller", transcript)
             self._turns.put_nowait((transcript, language))
 
@@ -292,12 +316,12 @@ class Session:
             return
         self._turn_interrupted = True  # also drops the rest of this turn's planned speech
         task.cancel()
+        with suppress(RuntimeError):
+            await self.transport.clear()
         await self._session_event(
             "voicebot_agent_interrupted",
             at_ms=max(0, int((monotonic() - self.started_at) * 1000)),
         )
-        with suppress(RuntimeError):
-            await self.transport.clear()
 
     async def _turn_worker(self) -> None:
         while True:
@@ -596,7 +620,7 @@ class Session:
             if not any(speaker == "caller" for _, speaker, _ in segments):
                 return
             provider = self._create_conversation(self.settings)
-            facts = await extract_facts(provider.complete_json, segments)
+            extraction = await extract_case(provider.complete_json, segments)
             stored = [
                 CaseFact(
                     field_name=f.field_name,
@@ -604,11 +628,19 @@ class Session:
                     source_transcript_segment_ids=f.source_transcript_segment_ids,
                     not_provided=f.not_provided,
                 ).model_dump(mode="json")
-                for f in facts
+                for f in extraction.facts
             ]
+            update_fields = {
+                "intake.facts": stored,
+                "intake.matter_type": extraction.matter_type,
+                "intake.triage_summary_encrypted": (
+                    self.encryptor.encrypt(extraction.summary) if extraction.summary else None
+                ),
+                "updated_at": datetime.now(UTC),
+            }
             await self.intake_collection.update_one(
                 {"voicebot_session_token_hash": self.session_token_hash},
-                {"$set": {"intake.facts": stored, "updated_at": datetime.now(UTC)}},
+                {"$set": update_fields},
             )
             await self._session_event("voicebot_facts_extracted", count=len(stored))
         except Exception:
@@ -623,6 +655,13 @@ class Session:
                 and self.conversation is not None
                 and not self.conversation.finished
             )
+        )
+
+    def _demo_agent_audio_active(self) -> bool:
+        return (
+            self.transport.provider == "demo"
+            and not self.settings.demo_barge_in_enabled
+            and (self._speech_task is not None or monotonic() < self._agent_audio_until)
         )
 
     async def run(self) -> None:
@@ -655,6 +694,8 @@ class Session:
                     self._worker = asyncio.create_task(self._turn_worker())
                     self._turns.put_nowait(None)
                 elif isinstance(event, Audio):
+                    if self._demo_agent_audio_active():
+                        continue
                     if self.recorder:
                         self.recorder.append_caller_audio(event.pcm)
                     if self.stt_session and self._wants_caller_audio():
