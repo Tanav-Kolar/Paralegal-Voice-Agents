@@ -37,6 +37,13 @@ class Users:
                 "active": True,
                 "password_hash": hash_password("correct long password"),
             },
+            "jury@example.test": {
+                "email": "jury@example.test",
+                "name": "Trial Lawyer",
+                "role": "demo_lawyer",
+                "active": True,
+                "password_hash": hash_password("correct long password"),
+            },
         }
 
     async def find_one(self, query):
@@ -140,7 +147,13 @@ class Calls:
         }
 
     async def find_one(self, query, projection):
-        return deepcopy(self.document) if query.get("id") == self.id else None
+        if query.get("id") != self.id:
+            return None
+        if query.get("telephony.provider", self.document["telephony"]["provider"]) != self.document[
+            "telephony"
+        ]["provider"]:
+            return None
+        return deepcopy(self.document)
 
     def find(self, query, projection):
         class Cursor:
@@ -148,13 +161,17 @@ class Calls:
                 return self
 
             async def to_list(self, length):
+                if query.get("telephony.provider", self_document["telephony"]["provider"]) != self_document["telephony"]["provider"]:
+                    return []
                 return [deepcopy(self_document)]
 
         self_document = self.document
         return Cursor()
 
     async def update_one(self, query, update):
-        if query.get("id") != self.id:
+        if query.get("id") != self.id or query.get(
+            "telephony.provider", self.document["telephony"]["provider"]
+        ) != self.document["telephony"]["provider"]:
             result = Result()
             result.matched_count = 0
             result.modified_count = 0

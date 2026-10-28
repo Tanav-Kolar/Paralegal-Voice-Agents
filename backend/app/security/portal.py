@@ -14,7 +14,7 @@ from app.db.mongodb import get_portal_users_collection
 
 PORTAL_COOKIE = "lawyer_portal_session"
 SESSION_SECONDS = 8 * 3600
-ROLES = {"admin", "lawyer", "reviewer"}
+ROLES = {"admin", "lawyer", "reviewer", "demo_lawyer"}
 
 
 def hash_password(password: str) -> str:

@@ -35,10 +35,14 @@ from app.services.brief import render_brief, triage
 router = APIRouter()
 
 
-def _review_collections(request: Request, settings: Settings, primary) -> list:
-    """Include configured historical databases after validating a portal session."""
+def _user_scope(user: dict) -> dict:
+    return {"telephony.provider": "demo"} if user["role"] == "demo_lawyer" else {}
+
+
+def _review_collections(request: Request, settings: Settings, primary, scope: dict) -> list:
+    """Include configured historical databases for unscoped portal sessions only."""
     collections = [primary]
-    if session_email(settings, request.cookies.get(PORTAL_COOKIE)):
+    if not scope and session_email(settings, request.cookies.get(PORTAL_COOKIE)):
         for name in dict.fromkeys(settings.portal_call_databases):
             if name != settings.mongodb_database:
                 collections.append(request.app.state.mongodb.client[name]["intake_calls"])
@@ -48,7 +52,7 @@ def _review_collections(request: Request, settings: Settings, primary) -> list:
 async def _find_call(
     request: Request, settings: Settings, primary, query: dict, projection: dict
 ) -> tuple[object, dict | None]:
-    for source in _review_collections(request, settings, primary):
+    for source in _review_collections(request, settings, primary, query):
         document = await source.find_one(query, projection)
         if document:
             return source, document
@@ -67,8 +71,8 @@ async def review_scope(
     if email:
         users = get_portal_users_collection(request)
         user = await users.find_one({"email": email, "active": True})
-        if user and user.get("role") in {"admin", "lawyer", "reviewer"}:
-            return {}
+        if user and user.get("role") in {"admin", "lawyer", "reviewer", "demo_lawyer"}:
+            return _user_scope(user)
     if settings.local_review_api_enabled and settings.app_env != "production":
         return {}
     if demo_access_ready(settings):
@@ -140,12 +144,12 @@ async def list_call_events(
     """Group lifecycle events by the full stream or provider call identifier."""
     sources = [(settings.mongodb_database, event_collection)]
     for name in dict.fromkeys(settings.portal_call_databases):
-        if name != settings.mongodb_database:
+        if name != settings.mongodb_database and user["role"] != "demo_lawyer":
             sources.append((name, request.app.state.mongodb.client[name]["call_events"]))
     sessions: dict[str, dict] = {}
     for database_name, source in sources:
         cursor = source.find(
-            {},
+            {"provider": "demo"} if user["role"] == "demo_lawyer" else {},
             {
                 "_id": 0,
                 "event_type": 1,
@@ -195,7 +199,7 @@ async def list_local_review_calls(
 ) -> list[dict[str, object]]:
     """List masked intake calls for review, newest first."""
     documents = []
-    for source in _review_collections(request, settings, collection):
+    for source in _review_collections(request, settings, collection, scope):
         cursor = source.find(
             scope,
             {
@@ -308,7 +312,7 @@ async def get_review_call(
     event_collection=Depends(get_call_events_collection),
 ) -> dict:
     source, document = await _find_call(
-        request, settings, collection, {"id": str(intake_call_id)}, {"_id": 0}
+        request, settings, collection, {"id": str(intake_call_id), **_user_scope(user)}, {"_id": 0}
     )
     if not document:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Call not found")
@@ -360,7 +364,7 @@ async def save_review(
     request: Request,
     intake_call_id: UUID,
     body: ReviewUpdate,
-    user: dict = Depends(require_role("admin", "lawyer", "reviewer")),
+    user: dict = Depends(require_role("admin", "lawyer", "reviewer", "demo_lawyer")),
     settings: Settings = Depends(get_settings),
     encryptor: FieldEncryptor | None = Depends(get_optional_field_encryptor),
     collection=Depends(get_intake_calls_collection),
@@ -370,7 +374,7 @@ async def save_review(
         request,
         settings,
         collection,
-        {"id": str(intake_call_id)},
+        {"id": str(intake_call_id), **_user_scope(user)},
         {"lawyer_review.status": 1, "lawyer_review.internal_notes_encrypted": 1},
     )
     if not existing:
@@ -399,7 +403,7 @@ async def save_review(
         except ValueError:
             pass
     result = await source.update_one(
-        {"id": str(intake_call_id)},
+        {"id": str(intake_call_id), **_user_scope(user)},
         {"$set": update_fields},
     )
     if not result.matched_count:
@@ -430,14 +434,14 @@ async def save_review(
 async def generate_report(
     request: Request,
     intake_call_id: UUID,
-    user: dict = Depends(require_role("admin", "lawyer")),
+    user: dict = Depends(require_role("admin", "lawyer", "demo_lawyer")),
     settings: Settings = Depends(get_settings),
     encryptor: FieldEncryptor | None = Depends(get_optional_field_encryptor),
     collection=Depends(get_intake_calls_collection),
     audit_collection=Depends(get_intake_audit_events_collection),
 ) -> dict:
     source, document = await _find_call(
-        request, settings, collection, {"id": str(intake_call_id)}, {"_id": 0}
+        request, settings, collection, {"id": str(intake_call_id), **_user_scope(user)}, {"_id": 0}
     )
     if not document:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Call not found")
@@ -473,7 +477,11 @@ async def generate_report(
         ),
     )
     result = await source.update_one(
-        {"id": str(intake_call_id), "intake.reports.version": {"$ne": version}},
+        {
+            "id": str(intake_call_id),
+            **_user_scope(user),
+            "intake.reports.version": {"$ne": version},
+        },
         {"$push": {"intake.reports": report.model_dump(mode="json")}},
     )
     if not result.modified_count:
@@ -503,7 +511,11 @@ async def download_report(
     collection=Depends(get_intake_calls_collection),
 ) -> Response:
     _, document = await _find_call(
-        request, settings, collection, {"id": str(intake_call_id)}, {"intake.reports": 1}
+        request,
+        settings,
+        collection,
+        {"id": str(intake_call_id), **_user_scope(user)},
+        {"intake.reports": 1},
     )
     if not document:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Call not found")

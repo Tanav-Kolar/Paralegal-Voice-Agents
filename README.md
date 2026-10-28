@@ -106,6 +106,6 @@ activation, and troubleshooting.
 
 The named-user portal is served at `/portal` in the production Docker image. Set
 `PORTAL_SESSION_SECRET` to a random secret of at least 32 characters, provision
-users with `python create_portal_user.py EMAIL {admin|lawyer|reviewer}` from
+users with `python create_portal_user.py EMAIL {admin|lawyer|reviewer|demo_lawyer}` from
 `backend/`, and keep `FIELD_ENCRYPTION_KEY` and private GCS storage configured.
 See [portal setup](frontend/README.md) for local use and role behavior.

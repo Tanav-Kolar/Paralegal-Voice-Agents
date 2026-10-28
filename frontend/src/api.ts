@@ -57,7 +57,7 @@ export async function startDemoSession(): Promise<DemoSession> {
   return response.json() as Promise<DemoSession>;
 }
 
-export type PortalUser = { email: string; name: string; role: "admin" | "lawyer" | "reviewer" };
+export type PortalUser = { email: string; name: string; role: "admin" | "lawyer" | "reviewer" | "demo_lawyer" };
 export type TriageSummary = {
   matterType: string | null;
   language: string | null;

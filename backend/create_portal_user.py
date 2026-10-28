@@ -12,7 +12,7 @@ from app.security.portal import ROLES, hash_password
 
 async def main() -> None:
     if len(sys.argv) != 3 or sys.argv[2] not in ROLES:
-        raise SystemExit("Usage: python create_portal_user.py EMAIL {admin|lawyer|reviewer}")
+        raise SystemExit("Usage: python create_portal_user.py EMAIL {admin|lawyer|reviewer|demo_lawyer}")
     email = sys.argv[1].strip().lower()
     if "@" not in email:
         raise SystemExit("A valid email is required")
