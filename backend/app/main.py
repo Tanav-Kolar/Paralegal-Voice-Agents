@@ -25,13 +25,19 @@ async def lifespan(app: FastAPI):
     logger.info("application_stopped")
 
 
-def create_app() -> FastAPI:
+def create_app(frontend_dist: Path | None = None) -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
     app.include_router(api_router, prefix=settings.api_v1_prefix)
-    frontend_dist = Path(__file__).resolve().parents[1] / "frontend_dist"
+    frontend_dist = frontend_dist or Path(__file__).resolve().parents[1] / "frontend_dist"
     if frontend_dist.is_dir():
         app.mount("/assets", StaticFiles(directory=frontend_dist / "assets"), name="portal-assets")
+
+        @app.get("/mic-worklet.js", include_in_schema=False)
+        async def microphone_worklet() -> FileResponse:
+            return FileResponse(
+                frontend_dist / "mic-worklet.js", media_type="application/javascript"
+            )
 
         @app.get("/", include_in_schema=False)
         @app.get("/portal", include_in_schema=False)
