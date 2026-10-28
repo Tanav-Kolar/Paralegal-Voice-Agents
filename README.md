@@ -97,3 +97,11 @@ GitHub Actions runs backend and frontend checks for pull requests and pushes to
 `main`. After checks pass on `main`, it builds the backend image and updates the
 existing Cloud Run service. See [CI/CD setup](CICD.md) for authentication,
 activation, and troubleshooting.
+
+## Lawyer portal
+
+The named-user portal is served at `/portal` in the production Docker image. Set
+`PORTAL_SESSION_SECRET` to a random secret of at least 32 characters, provision
+users with `python create_portal_user.py EMAIL {admin|lawyer|reviewer}` from
+`backend/`, and keep `FIELD_ENCRYPTION_KEY` and private GCS storage configured.
+See [portal setup](frontend/README.md) for local use and role behavior.

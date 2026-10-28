@@ -1,7 +1,8 @@
 """Shared-access-code gate for the hosted prototype, using a signed HttpOnly cookie."""
 
 from hashlib import sha256
-from hmac import compare_digest, new as hmac_new
+from hmac import compare_digest
+from hmac import new as hmac_new
 from time import monotonic, time
 
 from fastapi import Depends, HTTPException, Request, status
@@ -13,7 +14,7 @@ ACCESS_TTL_SECONDS = 8 * 3600
 LOGIN_WINDOW_SECONDS = 600
 LOGIN_MAX_ATTEMPTS = 10
 
-# ponytail: in-memory per-instance limiter; use a shared store if Cloud Run scales past one instance.
+# In-memory per-instance limiter; use a shared store if Cloud Run scales past one instance.
 _failed_logins: dict[str, list[float]] = {}
 
 
@@ -49,7 +50,9 @@ def check_login_allowed(client_id: str) -> None:
     recent = [t for t in _failed_logins.get(client_id, []) if now - t < LOGIN_WINDOW_SECONDS]
     _failed_logins[client_id] = recent
     if len(recent) >= LOGIN_MAX_ATTEMPTS:
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many attempts. Try again later.")
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS, "Too many attempts. Try again later."
+        )
 
 
 def record_failed_login(client_id: str) -> None:

@@ -35,7 +35,11 @@ class FakeIntakeCallsCollection:
 
     def _matches(self, item: dict, filter: dict) -> bool:
         return all(
-            (item.get("telephony", {}).get("provider") if key == "telephony.provider" else item.get(key))
+            (
+                item.get("telephony", {}).get("provider")
+                if key == "telephony.provider"
+                else item.get(key)
+            )
             == value
             for key, value in filter.items()
         )

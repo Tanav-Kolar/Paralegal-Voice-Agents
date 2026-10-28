@@ -74,7 +74,7 @@ jobs:
           fi
       - name: Build image
         if: steps.current.outputs.deploy == 'true'
-        run: docker build -t "$IMAGE:$GITHUB_SHA" backend
+        run: docker build -f backend/Dockerfile -t "$IMAGE:$GITHUB_SHA" .
       - name: Authenticate to Google Cloud
         if: steps.current.outputs.deploy == 'true'
         uses: google-github-actions/auth@v3

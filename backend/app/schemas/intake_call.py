@@ -54,6 +54,7 @@ class TelephonyDetails(BaseModel):
     caller_phone_encrypted: str = Field(min_length=1)
     caller_phone_masked: str = Field(min_length=1, max_length=32)
     started_at: datetime
+    stream_sid: str | None = Field(default=None, max_length=255)
 
 
 class TelephonyDetailsInput(BaseModel):

@@ -12,6 +12,8 @@ class IntakeAuditEventType(StrEnum):
     CONSENT_RECORDED = "consent_recorded"
     ARTIFACT_ATTACHED = "artifact_attached"
     REVIEW_STATUS_CHANGED = "review_status_changed"
+    REVIEW_NOTES_SAVED = "review_notes_saved"
+    REPORT_GENERATED = "report_generated"
 
 
 class IntakeAuditEvent(BaseModel):

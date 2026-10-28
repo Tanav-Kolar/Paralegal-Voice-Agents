@@ -62,19 +62,21 @@ class GoogleCloudStorageProvider:
         await asyncio.to_thread(self._upload, key, content, content_type)
         return StoredObject(key=key, content_type=content_type)
 
-    async def create_download_url(self, key: str) -> str:
+    async def create_download_url(self, key: str, *, filename: str | None = None) -> str:
         if not key or key.startswith("/") or ".." in Path(key).parts:
             raise ValueError("Storage key is invalid")
-        return await asyncio.to_thread(self._signed_download_url, key)
+        return await asyncio.to_thread(self._signed_download_url, key, filename)
 
     def _upload(self, key: str, content: bytes, content_type: str) -> None:
         blob = self._client.bucket(self._bucket_name).blob(key)
         blob.upload_from_string(content, content_type=content_type)
 
-    def _signed_download_url(self, key: str) -> str:
+    def _signed_download_url(self, key: str, filename: str | None = None) -> str:
         blob = self._client.bucket(self._bucket_name).blob(key)
+        disposition = f'attachment; filename="{Path(filename).name}"' if filename else None
         return blob.generate_signed_url(
             version="v4",
             expiration=self._signed_url_ttl,
             method="GET",
+            response_disposition=disposition,
         )

@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     api_v1_prefix: str = "/api/v1"
     mongodb_uri: str = "mongodb://localhost:27017"
     mongodb_database: str = "paralegal_voice_agents"
+    portal_call_databases: Annotated[list[str], NoDecode] = Field(default_factory=list)
     firm_name: str = "Victus Family Law Firm"
     firm_primary_phone: str = ""
     firm_office_timezone: str = "Asia/Kolkata"
@@ -53,6 +54,7 @@ class Settings(BaseSettings):
     demo_mode_enabled: bool = False
     demo_access_code: str = ""
     access_cookie_secret: str = ""
+    portal_session_secret: str = ""
     demo_session_max_seconds: int = Field(default=300, ge=30, le=1800)
     demo_max_concurrent_sessions: int = Field(default=3, ge=1, le=20)
     field_encryption_key: str = ""
@@ -62,6 +64,13 @@ class Settings(BaseSettings):
     @field_validator("firm_supported_jurisdictions", mode="before")
     @classmethod
     def parse_comma_separated_values(cls, value: str | list[str]) -> list[str]:
+        if isinstance(value, list):
+            return value
+        return [item.strip() for item in value.split(",") if item.strip()]
+
+    @field_validator("portal_call_databases", mode="before")
+    @classmethod
+    def parse_portal_call_databases(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, list):
             return value
         return [item.strip() for item in value.split(",") if item.strip()]

@@ -43,3 +43,15 @@ def get_field_encryptor(settings: Settings = Depends(get_settings)) -> FieldEncr
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Field encryption key is invalid",
         ) from error
+
+
+def get_optional_field_encryptor(
+    settings: Settings = Depends(get_settings),
+) -> FieldEncryptor | None:
+    """Allow metadata review when a legacy deployment key is unavailable."""
+    if not settings.field_encryption_key:
+        return None
+    try:
+        return FieldEncryptor(settings.field_encryption_key)
+    except ValueError:
+        return None

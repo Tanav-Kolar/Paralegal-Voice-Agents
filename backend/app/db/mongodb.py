@@ -32,3 +32,7 @@ def get_intake_calls_collection(connection: HTTPConnection) -> AsyncCollection:
 
 def get_intake_audit_events_collection(connection: HTTPConnection) -> AsyncCollection:
     return connection.app.state.mongodb.database["intake_audit_events"]
+
+
+def get_portal_users_collection(connection: HTTPConnection) -> AsyncCollection:
+    return connection.app.state.mongodb.database["portal_users"]

@@ -193,9 +193,7 @@ class Session:
         )
 
     async def _update_call(self, **fields: object) -> None:
-        await update_voicebot_intake_call(
-            self.intake_collection, self.session_token_hash, **fields
-        )
+        await update_voicebot_intake_call(self.intake_collection, self.session_token_hash, **fields)
 
     async def speak(
         self,
@@ -323,9 +321,7 @@ class Session:
         with suppress(TimeoutError):
             await asyncio.wait_for(self._turns.join(), timeout=10)
 
-    async def _handle_transcript(
-        self, transcript: str, language: str | None
-    ) -> None:
+    async def _handle_transcript(self, transcript: str, language: str | None) -> None:
         if self.language_workflow.state == LanguageSelectionState.AWAITING_SELECTION:
             await self._handle_language_response(transcript)
             return
@@ -605,6 +601,7 @@ class Session:
                         )
                         continue
                     self.stream_sid = event.stream_sid
+                    await self._update_call(**{"telephony.stream_sid": self.stream_sid})
                     logger.info("exotel_voicebot_stream_started stream_sid=%s", self.stream_sid)
                     await self._session_event("voicebot_stream_started")
                     try:
