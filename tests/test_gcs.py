@@ -11,11 +11,13 @@ class FakeBlob:
     def __init__(self, key: str) -> None:
         self.key = key
         self.uploads: list[tuple[bytes, str]] = []
+        self.signed_url_options: dict | None = None
 
     def upload_from_string(self, content: bytes, content_type: str) -> None:
         self.uploads.append((content, content_type))
 
     def generate_signed_url(self, **kwargs) -> str:
+        self.signed_url_options = kwargs
         assert kwargs["version"] == "v4"
         assert kwargs["method"] == "GET"
         return f"https://storage.example.test/{self.key}?signature=temporary"
@@ -32,9 +34,15 @@ class FakeBucket:
 class FakeStorageClient:
     def __init__(self) -> None:
         self.buckets: dict[str, FakeBucket] = {}
+        self._credentials = FakeCredentials()
 
     def bucket(self, name: str) -> FakeBucket:
         return self.buckets.setdefault(name, FakeBucket())
+
+
+class FakeCredentials:
+    valid = True
+    token = "runtime-access-token"
 
 
 @pytest.mark.asyncio
@@ -79,3 +87,23 @@ def test_gcs_provider_uses_application_default_credentials_without_key_file() ->
         GoogleCloudStorageProvider.from_settings(settings)
 
     client_factory.assert_called_once_with(project="demo-project")
+
+
+@pytest.mark.asyncio
+async def test_gcs_provider_signs_with_cloud_run_identity() -> None:
+    client = FakeStorageClient()
+    provider = GoogleCloudStorageProvider(
+        "demo-private-bucket",
+        10,
+        client,  # type: ignore[arg-type]
+        signing_service_account_email="runtime@example.test",
+    )
+
+    await provider.create_download_url("intake-calls/call/recording.wav")
+
+    options = client.bucket("demo-private-bucket").blobs[
+        "intake-calls/call/recording.wav"
+    ].signed_url_options
+    assert options is not None
+    assert options["service_account_email"] == "runtime@example.test"
+    assert options["access_token"] == "runtime-access-token"

@@ -89,7 +89,9 @@ def test_demo_ignores_microphone_audio_while_agent_speaks_by_default(monkeypatch
             websocket.send_text("stop")
             assert websocket.receive()["type"] == "websocket.close"
     assert stt_sessions[0].audio_payloads == []
-    assert not any(event["event_type"] == "voicebot_agent_interrupted" for event in events.documents)
+    assert not any(
+        event["event_type"] == "voicebot_agent_interrupted" for event in events.documents
+    )
 
 
 def test_demo_can_enable_barge_in_explicitly(monkeypatch) -> None:

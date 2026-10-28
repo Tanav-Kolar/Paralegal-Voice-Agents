@@ -595,7 +595,10 @@ def test_hindi_consent_answer_keeps_agent_in_english() -> None:
             websocket.send_json({"event": "stop"})
 
     assert tts_providers[0].texts == [ENGLISH_CONSENT_PROMPT]
-    assert all(provider.requests == [("en-IN", "aparna_en_companion")] for provider in tts_providers)
+    assert all(
+        provider.requests == [("en-IN", "aparna_en_companion")]
+        for provider in tts_providers
+    )
     assert events.intake_calls.documents[0]["language"]["preferred"] == "english"
 
 
