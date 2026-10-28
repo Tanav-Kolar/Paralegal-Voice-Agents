@@ -10,7 +10,9 @@ type View = "portal" | "demo";
 function App() {
   const [user, setUser] = useState<PortalUser | null>(null);
   const [access, setAccess] = useState<AccessState | null>(null);
-  const [view, setView] = useState<View>("portal");
+  const [view, setView] = useState<View>(
+    () => new URLSearchParams(window.location.search).get("view") === "demo" ? "demo" : "portal",
+  );
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
