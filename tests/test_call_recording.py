@@ -4,29 +4,38 @@ from wave import open as wave_open
 from app.services.call_recording import ConsentGatedCallRecorder
 
 
-def test_call_recorder_outputs_only_non_empty_wav_tracks() -> None:
-    recorder = ConsentGatedCallRecorder(sample_rate=8000)
-    recorder.append_caller_audio(b"caller-pcm")
+def test_call_recorder_outputs_one_mixed_wav_track() -> None:
+    now = [0.0]
+    recorder = ConsentGatedCallRecorder(sample_rate=8000, clock=lambda: now[0])
+    recorder.append_caller_audio(b"\x01\x00")
+    now[0] = 0.000125
+    recorder.append_agent_audio(b"\x02\x00")
 
-    tracks = recorder.to_wav_tracks()
+    track = recorder.to_wav_track()
 
-    assert [track.filename for track in tracks] == ["recording-caller.wav"]
-    with wave_open(BytesIO(tracks[0].content), "rb") as wav_file:
+    assert track and track.filename == "recording-call.wav"
+    with wave_open(BytesIO(track.content), "rb") as wav_file:
         assert wav_file.getnchannels() == 1
         assert wav_file.getsampwidth() == 2
         assert wav_file.getframerate() == 8000
-        assert wav_file.readframes(wav_file.getnframes()) == b"caller-pcm"
+        assert wav_file.readframes(wav_file.getnframes()) == b"\x01\x00\x02\x00"
 
 
 
-def test_call_recorder_writes_each_track_at_its_own_sample_rate() -> None:
-    recorder = ConsentGatedCallRecorder(sample_rate=8000, agent_sample_rate=24000)
-    recorder.append_caller_audio(b"\x00\x00")
-    recorder.append_agent_audio(b"\x00\x00")
+def test_call_recorder_mixes_overlapping_audio_and_requires_matching_rates() -> None:
+    now = [0.0]
+    recorder = ConsentGatedCallRecorder(sample_rate=8000, clock=lambda: now[0])
+    recorder.append_caller_audio(b"\x10\x00")
+    recorder.append_agent_audio(b"\x20\x00")
 
-    rates = {}
-    for track in recorder.to_wav_tracks():
-        with wave_open(BytesIO(track.content), "rb") as wav_file:
-            rates[track.filename] = wav_file.getframerate()
+    track = recorder.to_wav_track()
+    assert track
+    with wave_open(BytesIO(track.content), "rb") as wav_file:
+        assert wav_file.readframes(wav_file.getnframes()) == b"\x30\x00"
 
-    assert rates == {"recording-caller.wav": 8000, "recording-agent.wav": 24000}
+    try:
+        ConsentGatedCallRecorder(sample_rate=8000, agent_sample_rate=24000)
+    except ValueError as error:
+        assert "must match" in str(error)
+    else:
+        raise AssertionError("Expected mismatched sample rates to be rejected")

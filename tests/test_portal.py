@@ -235,6 +235,16 @@ def test_portal_sign_in_review_and_versioned_pdf(monkeypatch):
         detail = client.get(path).json()
         assert detail["summary"]["facts"][0]["value"] == "Delhi"
         assert "मुझे" in detail["summary"]["overview"]
+        assert detail["transcript"] == [
+            {
+                "id": detail["transcript"][0]["id"],
+                "speaker": "caller",
+                "text": "मुझे वकील से बात करनी है।",
+                "startedAtMs": 0,
+                "endedAtMs": 0,
+                "language": None,
+            }
+        ]
         assert len(detail["events"]) == 3
         sessions = client.get("/api/v1/review/events").json()
         assert len(sessions) == 2

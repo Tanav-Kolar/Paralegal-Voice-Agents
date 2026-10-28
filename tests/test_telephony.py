@@ -469,13 +469,13 @@ def test_exotel_voicebot_stream_routes_final_consent_to_tts_response() -> None:
             )
             websocket.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
             response_audio = websocket.receive_json()
-            websocket.receive_json()
             websocket.send_json({"event": "stop"})
 
     assert tts_providers[0].texts == [LANGUAGE_SELECTION_PROMPT]
     assert tts_providers[2].texts == [ENGLISH_CONSENT_PROMPT]
-    assert tts_providers[3].texts == [ENGLISH_CONSENT_GRANTED_RESPONSE]
-    assert tts_providers[4].texts == ["Please tell me more."]
+    assert tts_providers[3].texts == [
+        f"{ENGLISH_CONSENT_GRANTED_RESPONSE} Please tell me more."
+    ]
     assert response_audio == {
         "event": "media",
         "stream_sid": "stream-consent-yes",
@@ -528,31 +528,27 @@ def test_exotel_voicebot_stream_stores_only_post_consent_audio_in_gcs(monkeypatc
             )
             websocket.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
             websocket.receive_json()
-            websocket.receive_json()
             websocket.send_json(
                 {"event": "media", "media": {"payload": "Y2FsbGVyLXBvc3QtY29uc2VudCE="}}
             )
             websocket.send_json({"event": "stop"})
 
-    assert [item[1] for item in storage_provider.stored] == [
-        "recording-caller.wav",
-        "recording-agent.wav",
-    ]
-    caller_wav = storage_provider.stored[0][2]
-    with wave_open(BytesIO(caller_wav), "rb") as wav_file:
-        assert wav_file.readframes(wav_file.getnframes()) == b"caller-post-consent!"
+    assert [item[1] for item in storage_provider.stored] == ["recording-call.wav"]
+    call_wav = storage_provider.stored[0][2]
+    with wave_open(BytesIO(call_wav), "rb") as wav_file:
+        assert wav_file.getnchannels() == 1
+        assert wav_file.getframerate() == 8000
+        assert wav_file.getnframes() > 0
     intake_call = events.intake_calls.documents[0]
     artifacts = intake_call["intake"]["artifacts"]
     assert [artifact["storage_key"] for artifact in artifacts] == [
-        f"intake-calls/{intake_call['id']}/recording-caller.wav",
-        f"intake-calls/{intake_call['id']}/recording-agent.wav",
+        f"intake-calls/{intake_call['id']}/recording-call.wav",
     ]
     assert intake_call["disclosures"]["recording_started_at"] is not None
     assert intake_call["disclosures"]["recording_stopped_at"] is not None
     assert [event["event_type"] for event in events.audit_events.documents] == [
         "intake_created",
         "consent_recorded",
-        "artifact_attached",
         "artifact_attached",
     ]
 
@@ -634,7 +630,7 @@ def test_exotel_voicebot_stream_uses_hindi_consent_dialogue() -> None:
 
 @pytest.mark.parametrize(
     ("chosen", "expected_code", "expected_speaker"),
-    [("English", "en-IN", "simran_en_customer"), ("हिंदी", "hi-IN", "aparna_hi_customer")],
+    [("English", "en-IN", "aparna_en_companion"), ("हिंदी", "hi-IN", "aparna_hi_customer")],
 )
 def test_post_consent_mixed_language_details_are_encrypted_and_stored_once(
     chosen, expected_code, expected_speaker
@@ -668,8 +664,6 @@ def test_post_consent_mixed_language_details_are_encrypted_and_stored_once(
                 stt_sessions[0].transcript_on_next_audio = ("transcript.final", utterance, detected)
                 ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
                 ws.receive_json()
-                if index == 1:
-                    ws.receive_json()
             ws.send_json({"event": "stop"})
 
     intake = events.intake_calls.documents[0]["intake"]
@@ -682,7 +676,7 @@ def test_post_consent_mixed_language_details_are_encrypted_and_stored_once(
     assert [s["detected_language"] for s in segments] == [language for _, language in turns]
     assert "Mera naam" not in str(intake)
     assert intake["facts"] == []
-    assert len(agent_segments) == len(turns) + 2
+    assert len(agent_segments) == len(turns) + 1
     assert all(s["detected_language"] == expected_code for s in agent_segments)
     assert all(s["text_encrypted"].startswith("fernet:v1:") for s in agent_segments)
     assert all(p.requests == [(expected_code, expected_speaker)] for p in tts_providers[2:])
@@ -727,8 +721,6 @@ def test_general_intake_preserves_answers_without_inventing_facts() -> None:
                 stt_sessions[0].transcript_on_next_audio = ("transcript.final", utterance, "hi-IN")
                 ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
                 ws.receive_json()
-                if index == 1:
-                    ws.receive_json()
             ws.send_json({"event": "stop"})
     call = events.intake_calls.documents[0]
     assert call["status"] == "completed"
@@ -762,8 +754,6 @@ def test_conversation_provider_failure_stops_intake_and_keeps_previous_transcrip
                 stt_sessions[0].transcript_on_next_audio = ("transcript.final", utterance, "en-IN")
                 ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
                 ws.receive_json()
-                if index == 1:
-                    ws.receive_json()
             ws.send_json({"event": "stop"})
     call = events.intake_calls.documents[0]
     assert call["status"] == "abandoned"

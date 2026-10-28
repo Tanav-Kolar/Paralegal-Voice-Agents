@@ -1,7 +1,9 @@
-"""Consent-gated in-memory PCM recording for a single voicebot session."""
+"""Consent-gated, time-aligned PCM recording for a single voicebot session."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from io import BytesIO
+from time import monotonic
 from wave import open as wave_open
 
 
@@ -14,37 +16,56 @@ class RecordedAudioTrack:
 
 
 class ConsentGatedCallRecorder:
-    """Keep post-consent Linear16 audio in separate caller and agent tracks."""
+    """Mix post-consent caller and agent Linear16 audio into one call recording."""
 
-    def __init__(self, sample_rate: int, agent_sample_rate: int | None = None) -> None:
-        self._caller_rate = sample_rate
-        self._agent_rate = agent_sample_rate or sample_rate
-        self._caller_pcm = bytearray()
-        self._agent_pcm = bytearray()
+    def __init__(
+        self,
+        sample_rate: int,
+        agent_sample_rate: int | None = None,
+        *,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        if agent_sample_rate not in (None, sample_rate):
+            raise ValueError("Caller and agent sample rates must match for a mixed recording")
+        self._sample_rate = sample_rate
+        self._clock = clock
+        self._started_at = clock()
+        self._mixed_pcm = bytearray()
 
     def append_caller_audio(self, pcm_audio: bytes) -> None:
-        """Append a caller Linear16 PCM frame."""
-        self._caller_pcm.extend(pcm_audio)
+        """Mix a caller Linear16 frame at its place in the call timeline."""
+        self._mix_at_current_time(pcm_audio)
 
     def append_agent_audio(self, pcm_audio: bytes) -> None:
-        """Append an agent Linear16 PCM frame."""
-        self._agent_pcm.extend(pcm_audio)
+        """Mix an agent Linear16 frame at its place in the call timeline."""
+        self._mix_at_current_time(pcm_audio)
 
-    def to_wav_tracks(self) -> list[RecordedAudioTrack]:
-        """Return non-empty, standard mono WAV tracks suitable for private storage."""
-        tracks: list[RecordedAudioTrack] = []
-        for filename, pcm_audio, sample_rate in (
-            ("recording-caller.wav", self._caller_pcm, self._caller_rate),
-            ("recording-agent.wav", self._agent_pcm, self._agent_rate),
-        ):
-            if pcm_audio:
-                tracks.append(
-                    RecordedAudioTrack(
-                        filename=filename,
-                        content=self._as_wav(bytes(pcm_audio), sample_rate),
-                    )
-                )
-        return tracks
+    def to_wav_track(self) -> RecordedAudioTrack | None:
+        """Return one standard mono WAV recording, or None when no audio was captured."""
+        if not self._mixed_pcm:
+            return None
+        return RecordedAudioTrack(
+            filename="recording-call.wav",
+            content=self._as_wav(bytes(self._mixed_pcm), self._sample_rate),
+        )
+
+    def _mix_at_current_time(self, pcm_audio: bytes) -> None:
+        usable = len(pcm_audio) - len(pcm_audio) % 2
+        if usable == 0:
+            return
+        offset_samples = max(0, int((self._clock() - self._started_at) * self._sample_rate))
+        offset = offset_samples * 2
+        required = offset + usable
+        if required > len(self._mixed_pcm):
+            self._mixed_pcm.extend(b"\x00" * (required - len(self._mixed_pcm)))
+        for index in range(0, usable, 2):
+            position = offset + index
+            existing = int.from_bytes(
+                self._mixed_pcm[position : position + 2], "little", signed=True
+            )
+            incoming = int.from_bytes(pcm_audio[index : index + 2], "little", signed=True)
+            mixed = max(-32768, min(32767, existing + incoming))
+            self._mixed_pcm[position : position + 2] = mixed.to_bytes(2, "little", signed=True)
 
     @staticmethod
     def _as_wav(pcm_audio: bytes, sample_rate: int) -> bytes:

@@ -28,8 +28,10 @@ Browser WebSocket ─► BrowserTransport ┘       │
 - `app/api/routes/demo.py`: browser demo sessions (raw PCM frames, 8 kHz mono; the text frame `stop`
   hangs up).
 
-Barge-in is off by default (`VOICE_BARGE_IN_ENABLED`) because line echo can make the agent interrupt
-itself. STT and TTS sample rates must match, since caller and agent audio share one stream.
+Browser demo barge-in is on by default (`DEMO_BARGE_IN_ENABLED`) and uses browser echo
+cancellation. Telephony barge-in remains off by default (`VOICE_BARGE_IN_ENABLED`) because line
+echo can make the agent interrupt itself. STT and TTS sample rates must match, since caller and
+agent audio share one stream.
 
 ## Local setup
 

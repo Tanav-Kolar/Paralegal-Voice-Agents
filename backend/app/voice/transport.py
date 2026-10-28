@@ -50,6 +50,10 @@ class Transport(Protocol):
         """Drop agent audio the far end has buffered but not yet played."""
         ...
 
+    async def send_transcript(self, speaker: str, text: str) -> None:
+        """Send a display-only final transcript item when the transport supports it."""
+        ...
+
     async def close(self, code: int | None = None) -> None: ...
 
 
@@ -96,6 +100,10 @@ class ExotelTransport:
     async def clear(self) -> None:
         await self._websocket.send_json({"event": "clear", "stream_sid": self._stream_sid})
 
+    async def send_transcript(self, speaker: str, text: str) -> None:
+        # Exotel has no display surface; transcripts are retained by Session after consent instead.
+        return None
+
     async def close(self, code: int | None = None) -> None:
         if code is None:
             await self._websocket.close()
@@ -133,6 +141,9 @@ class BrowserTransport:
 
     async def clear(self) -> None:
         await self._websocket.send_text("clear")
+
+    async def send_transcript(self, speaker: str, text: str) -> None:
+        await self._websocket.send_json({"type": "transcript", "speaker": speaker, "text": text})
 
     async def close(self, code: int | None = None) -> None:
         if code is None:

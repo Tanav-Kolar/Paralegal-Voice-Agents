@@ -87,7 +87,7 @@ def make_client(
                         {
                             "kind": "call_recording",
                             "storage_provider": "gcs",
-                            "storage_key": f"intake-calls/{older_id}/recording-caller.wav",
+                            "storage_key": f"intake-calls/{older_id}/recording-call.wav",
                             "content_type": "audio/wav",
                         }
                     ]
@@ -122,7 +122,7 @@ def test_local_review_api_lists_masked_calls_newest_first() -> None:
     calls = response.json()
     assert [call["status"] for call in calls] == ["in_progress", "completed"]
     assert calls[1]["callerPhoneMasked"] == "+91******1234"
-    assert calls[1]["recordings"] == [{"index": 0, "label": "Caller"}]
+    assert calls[1]["recordings"] == [{"index": 0, "label": "Call"}]
 
 
 def test_local_review_api_redirects_to_signed_recording_url(monkeypatch) -> None:

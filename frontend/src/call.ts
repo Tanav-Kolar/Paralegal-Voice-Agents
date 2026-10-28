@@ -10,7 +10,9 @@ export type CallState = "idle" | "connecting" | "live" | "ended" | "error";
 type Handlers = {
   onState: (state: CallState, message?: string) => void;
   onLevel: (level: number) => void;
+  onAgentLevel: (level: number) => void;
   onAgentSpeaking: (speaking: boolean) => void;
+  onTranscript: (speaker: "agent" | "caller", text: string) => void;
 };
 
 export class VoiceCall {
@@ -78,6 +80,7 @@ export class VoiceCall {
       ws.onerror = () => reject(new Error("Could not reach the voice service."));
       ws.onmessage = (event) => {
         if (event.data === "clear") this.clearAgentAudio();
+        else if (typeof event.data === "string") this.handleEvent(event.data);
         else if (typeof event.data !== "string") this.playAgentAudio(new Uint8Array(event.data));
       };
       ws.onclose = (event) => {
@@ -95,12 +98,31 @@ export class VoiceCall {
     });
   }
 
+  private handleEvent(payload: string): void {
+    try {
+      const event: unknown = JSON.parse(payload);
+      if (
+        typeof event === "object" &&
+        event !== null &&
+        "type" in event &&
+        event.type === "transcript" &&
+        "speaker" in event &&
+        (event.speaker === "agent" || event.speaker === "caller") &&
+        "text" in event &&
+        typeof event.text === "string"
+      ) {
+        this.handlers.onTranscript(event.speaker, event.text);
+      }
+    } catch {
+      // Ignore unrelated textual control frames.
+    }
+  }
+
   private captureMicrophone(context: AudioContext, stream: MediaStream): void {
     const ratio = context.sampleRate / SAMPLE_RATE;
     this.nextOutput = ratio;
     const node = new AudioWorkletNode(context, "mic-capture");
     node.port.onmessage = (event: MessageEvent<Float32Array>) => {
-      const muted = this.agentIsSpeaking(context);
       let peak = 0;
       for (const sample of event.data) {
         peak = Math.max(peak, Math.abs(sample));
@@ -108,15 +130,15 @@ export class VoiceCall {
         this.count += 1;
         this.position += 1;
         if (this.position >= this.nextOutput) {
-          // Box-filter downsample to 8 kHz. While the agent talks, send silence so the
-          // microphone cannot pick up the agent's own voice (no barge-in in the demo).
-          this.pending.push(muted ? 0 : this.sum / this.count);
+          // Keep sending microphone audio during playback so the caller can interrupt.
+          // Browser echo cancellation limits the agent's audio entering this stream.
+          this.pending.push(this.sum / this.count);
           this.sum = 0;
           this.count = 0;
           this.nextOutput += ratio;
         }
       }
-      this.handlers.onLevel(muted ? 0 : peak);
+      this.handlers.onLevel(peak);
       while (this.pending.length >= CHUNK_SAMPLES) this.sendChunk(this.pending.splice(0, CHUNK_SAMPLES));
     };
     const silent = context.createGain();
@@ -146,7 +168,12 @@ export class VoiceCall {
     const pcm = new Int16Array(bytes.buffer.slice(0, usable));
     const buffer = context.createBuffer(1, pcm.length, SAMPLE_RATE);
     const channel = buffer.getChannelData(0);
-    for (let i = 0; i < pcm.length; i++) channel[i] = pcm[i] / 0x8000;
+    let peak = 0;
+    for (let i = 0; i < pcm.length; i++) {
+      channel[i] = pcm[i] / 0x8000;
+      peak = Math.max(peak, Math.abs(channel[i]));
+    }
+    this.handlers.onAgentLevel(peak);
     const source = context.createBufferSource();
     source.buffer = buffer;
     source.connect(context.destination);
@@ -169,6 +196,7 @@ export class VoiceCall {
     this.leftoverByte = null;
     this.playHead = 0;
     this.handlers.onAgentSpeaking(false);
+    this.handlers.onAgentLevel(0);
   }
 
   private agentIsSpeaking(context: AudioContext): boolean {
@@ -183,5 +211,6 @@ export class VoiceCall {
     this.context = null;
     this.handlers.onAgentSpeaking(false);
     this.handlers.onLevel(0);
+    this.handlers.onAgentLevel(0);
   }
 }

@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     sarvam_stt_mode: str = "codemix"
     sarvam_tts_model: str = "bulbul:v4-flash"
     sarvam_tts_language_code: str = "en-IN"
-    sarvam_tts_speaker: str = "simran_en_customer"
+    sarvam_tts_speaker: str = "aparna_en_companion"
     sarvam_tts_hindi_speaker: str = "aparna_hi_customer"
     sarvam_tts_sample_rate: int = 8000
     object_storage_provider: str = "unconfigured"
@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     local_review_api_enabled: bool = False
     # Off by default: without echo cancellation, line echo of the agent can interrupt it.
     voice_barge_in_enabled: bool = False
+    # The browser requests echo cancellation, so interruption is enabled for demo calls.
+    demo_barge_in_enabled: bool = True
     demo_mode_enabled: bool = False
     demo_access_code: str = ""
     access_cookie_secret: str = ""

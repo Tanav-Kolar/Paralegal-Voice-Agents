@@ -71,6 +71,14 @@ export type CallDetail = {
   summary: TriageSummary;
   reviewStatus: string;
   notes: string;
+  transcript: {
+    id: string;
+    speaker: "agent" | "caller";
+    text: string;
+    startedAtMs: number;
+    endedAtMs: number;
+    language: string | null;
+  }[];
   events: { type: string; receivedAt: string | null }[];
   reports: { version: number; generatedAt: string | null }[];
 };

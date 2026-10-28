@@ -13,6 +13,10 @@ const eventLabel = (type: string) => type.replace(/^voicebot_/, "").replaceAll("
 const date = (value: string | null) => value
   ? new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value))
   : "Time unavailable";
+const elapsed = (milliseconds: number) => {
+  const seconds = Math.floor(milliseconds / 1000);
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+};
 
 export function ReviewList({ user }: { user: PortalUser }) {
   const [section, setSection] = useState<"intakes" | "sessions">("intakes");
@@ -124,7 +128,8 @@ export function ReviewList({ user }: { user: PortalUser }) {
             <h4>Caller statements</h4>{detail.summary.callerStatements.length ? <ol className="statements">{detail.summary.callerStatements.map((item, index) => <li key={item.id || index}>{item.text}</li>)}</ol> : <p className="empty-inline">{detail.summary.contentUnavailable ? "Encrypted caller statements are unavailable." : "No caller statements were saved."}</p>}
           </section>
           <div className="case-side"><section className="case-section"><h3>Review</h3><label className="field">Status<select value={status} onChange={(e) => setStatus(e.target.value)}>{statuses.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><label className="field">Internal notes<textarea rows={6} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Add context for the next reviewer" /></label><button className="primary" disabled={busy} onClick={() => void save()}>Save review</button></section>
-          <section className="case-section"><h3>Recording</h3>{current.recordings.length ? current.recordings.map((recording) => <button key={recording.index} className="audio-button" onClick={() => toggleAudio(recording.index)}>{playing === `${selected}:${recording.index}` ? "Pause" : "Play"} {recording.label}</button>) : <p className="empty-inline">No saved recording.</p>}</section>
+          <section className="case-section"><h3>Call recording</h3>{current.recordings.length ? current.recordings.map((recording) => <button key={recording.index} className="audio-button" onClick={() => toggleAudio(recording.index)}>{playing === `${selected}:${recording.index}` ? "Pause" : "Play"} {recording.label}</button>) : <p className="empty-inline">No saved recording.</p>}</section>
+          <section className="case-section transcript-review"><h3>Call transcript</h3><p className="helper">Final speech-recognition results, ordered by call time.</p>{detail.transcript.length ? <ol className="review-transcript">{detail.transcript.map((item) => <li className={item.speaker} key={item.id || `${item.startedAtMs}-${item.text}`}><time>{elapsed(item.startedAtMs)}</time><div><span className="speaker-tag">{item.speaker === "agent" ? "Agent" : "Caller"}</span><p>{item.text}</p></div></li>)}</ol> : <p className="empty-inline">No consented transcript was saved.</p>}</section>
           <section className="case-section"><h3>Call events</h3>{detail.events.length ? <ol className="event-list">{detail.events.map((event, index) => <li key={`${event.type}-${index}`}><span>{event.type.replace(/^voicebot_/, "").replaceAll("_", " ")}</span><small>{date(event.receivedAt)}</small></li>)}</ol> : <p className="empty-inline">No call events were saved.</p>}</section>
           <section className="case-section"><h3>PDF briefs</h3><p className="helper">Each generated version is kept separately.</p>{user.role !== "reviewer" && <button className="secondary" disabled={busy} onClick={() => void createBrief()}>Create new brief</button>}{detail.reports.length ? <ul className="reports">{[...detail.reports].reverse().map((report) => <li key={report.version}><span>Version {report.version}<small>{date(report.generatedAt)}</small></span><a href={briefUrl(selected, report.version)}>Download PDF</a></li>)}</ul> : <p className="empty-inline">No brief created yet.</p>}</section></div>
         </div><p className="disclaimer">{detail.summary.disclaimer}</p>{message && <p className="message success" role="status">{message}</p>}

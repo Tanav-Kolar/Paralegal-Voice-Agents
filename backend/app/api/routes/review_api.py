@@ -103,6 +103,32 @@ def _recording_label(storage_key: str) -> str:
     return filename.removeprefix("recording-").replace("-", " ").title() or "Recording"
 
 
+def _transcript(document: dict, encryptor: FieldEncryptor | None) -> tuple[list[dict], bool]:
+    """Return the consented conversation in speaking order for lawyer review."""
+    items = []
+    unavailable = False
+    for segment in document.get("intake", {}).get("transcript_segments", []):
+        encrypted = segment.get("text_encrypted")
+        try:
+            text = encryptor.decrypt(encrypted) if encryptor and encrypted else None
+        except ValueError:
+            text = None
+        if not text:
+            unavailable = unavailable or bool(encrypted)
+            continue
+        items.append(
+            {
+                "id": str(segment.get("id", "")),
+                "speaker": segment.get("speaker", "caller"),
+                "text": text,
+                "startedAtMs": int(segment.get("started_at_ms", 0)),
+                "endedAtMs": int(segment.get("ended_at_ms", segment.get("started_at_ms", 0))),
+                "language": segment.get("detected_language"),
+            }
+        )
+    return sorted(items, key=lambda item: (item["startedAtMs"], item["id"])), unavailable
+
+
 @router.get("/events")
 async def list_call_events(
     request: Request,
@@ -278,7 +304,10 @@ async def get_review_call(
     except ValueError:
         decrypted_notes = ""
     summary = triage(document, encryptor)
+    transcript, transcript_unavailable = _transcript(document, encryptor)
     if notes and not decrypted_notes:
+        summary["contentUnavailable"] = True
+    if transcript_unavailable:
         summary["contentUnavailable"] = True
     events = []
     stream_sid = document.get("telephony", {}).get("stream_sid")
@@ -302,6 +331,7 @@ async def get_review_call(
         "summary": summary,
         "reviewStatus": review.get("status", "pending"),
         "notes": decrypted_notes,
+        "transcript": transcript,
         "events": events,
         "reports": [
             {"version": report["version"], "generatedAt": _isoformat(report.get("generated_at"))}

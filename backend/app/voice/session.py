@@ -20,6 +20,7 @@ from app.schemas.audit_event import IntakeAuditEventType
 from app.schemas.intake_call import (
     ArtifactKind,
     CallStatus,
+    CaseFact,
     LanguageChoice,
     ProtectedObjectReference,
     TranscriptSegment,
@@ -29,6 +30,7 @@ from app.security.field_encryption import FieldEncryptor
 from app.services.audit import record_audit_event
 from app.services.call_events import record_event
 from app.services.call_recording import ConsentGatedCallRecorder
+from app.services.extraction import extract_facts
 from app.voice.transport import Audio, Start, Stop, Transport
 from app.workflows.consent import (
     ConsentAction,
@@ -51,11 +53,10 @@ from app.workflows.language import (
 logger = logging.getLogger(__name__)
 
 LANGUAGE_SELECTION_PROMPT = (
-    "Hello. I am an AI assistant for the law firm. Please say English or Hindi to choose your "
-    "language."
+    "Hello. To speak in English, say English."
 )
 HINDI_LANGUAGE_SELECTION_PROMPT = (
-    "नमस्ते। मैं लॉ फर्म की एआई सहायक हूँ। अपनी भाषा चुनने के लिए कृपया अंग्रेज़ी या हिंदी कहें।"
+    "हिंदी में बात करने के लिए हिंदी कहें।"
 )
 LANGUAGE_SELECTION_REPROMPT = "Please say English or Hindi."
 HINDI_LANGUAGE_SELECTION_REPROMPT = "कृपया अंग्रेज़ी या हिंदी कहें।"
@@ -206,6 +207,7 @@ class Session:
             return
         async with self.speech_lock:
             self._sent_audio = False
+            await self.transport.send_transcript("agent", text)
             self._speech_task = asyncio.create_task(
                 self._stream_speech(text, language_code, speaker)
             )
@@ -273,9 +275,15 @@ class Session:
             language or "unknown",
             len(transcript),
         )
-        if event_type == "transcript.partial" and self.settings.voice_barge_in_enabled:
+        barge_in_enabled = (
+            self.settings.demo_barge_in_enabled
+            if self.transport.provider == "demo"
+            else self.settings.voice_barge_in_enabled
+        )
+        if event_type == "transcript.partial" and barge_in_enabled:
             await self._interrupt_speech()
         elif event_type == "transcript.final":
+            await self.transport.send_transcript("caller", transcript)
             self._turns.put_nowait((transcript, language))
 
     async def _interrupt_speech(self) -> None:
@@ -492,13 +500,8 @@ class Session:
                         self.language_workflow.selected_language,
                         self._create_conversation(self.settings),
                     )
-                    await self.speak(
-                        response,
-                        language_code=dialogue.language_code,
-                        speaker=self._speaker(self.conversation.language),
-                    )
                     first_reply = await self.conversation.begin()
-                    response = first_reply.reply
+                    response = f"{response} {first_reply.reply}"
                 except ConversationUnavailable:
                     if self.conversation:
                         self.conversation.finished = True
@@ -547,37 +550,69 @@ class Session:
         if self.recording_finalized or not self.recording_provider or not self.recorder:
             return
         self.recording_finalized = True
-        stored_any_track = False
-        for track in self.recorder.to_wav_tracks():
-            try:
-                stored_object = await self.recording_provider.store(
-                    self.intake_call_id,
-                    track.filename,
-                    track.content,
-                    "audio/wav",
-                )
-                artifact = ProtectedObjectReference(
-                    kind=ArtifactKind.CALL_RECORDING,
-                    storage_provider="gcs",
-                    storage_key=stored_object.key,
-                    content_type=stored_object.content_type,
-                )
-                if await attach_voicebot_recording_artifact(
-                    self.intake_collection, self.session_token_hash, artifact
-                ):
-                    stored_any_track = True
-                    await record_audit_event(
-                        self.audit_collection,
-                        intake_call_id=self.intake_call_id,
-                        event_type=IntakeAuditEventType.ARTIFACT_ATTACHED,
-                        details={"artifact_kind": artifact.kind.value},
-                    )
-                    await self._session_event("voicebot_recording_stored", track=track.filename)
-            except (OSError, ValueError):
-                logger.exception("voicebot_recording_store_failed stream_sid=%s", self.stream_sid)
-                await self._session_event("voicebot_recording_store_failed", track=track.filename)
-        if stored_any_track:
+        track = self.recorder.to_wav_track()
+        if not track:
+            return
+        try:
+            stored_object = await self.recording_provider.store(
+                self.intake_call_id, track.filename, track.content, "audio/wav"
+            )
+            artifact = ProtectedObjectReference(
+                kind=ArtifactKind.CALL_RECORDING,
+                storage_provider="gcs",
+                storage_key=stored_object.key,
+                content_type=stored_object.content_type,
+            )
+            stored = await attach_voicebot_recording_artifact(
+                self.intake_collection, self.session_token_hash, artifact
+            )
+            if not stored:
+                return
+            await record_audit_event(
+                self.audit_collection,
+                intake_call_id=self.intake_call_id,
+                event_type=IntakeAuditEventType.ARTIFACT_ATTACHED,
+                details={"artifact_kind": artifact.kind.value},
+            )
+            await self._session_event("voicebot_recording_stored", track=track.filename)
             await self._update_call(**{"disclosures.recording_stopped_at": datetime.now(UTC)})
+        except (OSError, ValueError):
+            logger.exception("voicebot_recording_store_failed stream_sid=%s", self.stream_sid)
+            await self._session_event("voicebot_recording_store_failed", track=track.filename)
+
+    async def _extract_facts(self) -> None:
+        """Best effort: a failure here must never lose the call, so it only logs."""
+        if self.consent_workflow.state != ConsentState.GRANTED or not self.conversation:
+            return
+        try:
+            document = await self.intake_collection.find_one(
+                {"voicebot_session_token_hash": self.session_token_hash},
+                {"intake.transcript_segments": 1},
+            )
+            segments = [
+                (UUID(str(s["id"])), s["speaker"], self.encryptor.decrypt(s["text_encrypted"]))
+                for s in (document or {}).get("intake", {}).get("transcript_segments", [])
+            ]
+            if not any(speaker == "caller" for _, speaker, _ in segments):
+                return
+            provider = self._create_conversation(self.settings)
+            facts = await extract_facts(provider.complete_json, segments)
+            stored = [
+                CaseFact(
+                    field_name=f.field_name,
+                    value_encrypted=self.encryptor.encrypt(f.value) if f.value else None,
+                    source_transcript_segment_ids=f.source_transcript_segment_ids,
+                    not_provided=f.not_provided,
+                ).model_dump(mode="json")
+                for f in facts
+            ]
+            await self.intake_collection.update_one(
+                {"voicebot_session_token_hash": self.session_token_hash},
+                {"$set": {"intake.facts": stored, "updated_at": datetime.now(UTC)}},
+            )
+            await self._session_event("voicebot_facts_extracted", count=len(stored))
+        except Exception:
+            logger.exception("voicebot_fact_extraction_failed stream_sid=%s", self.stream_sid)
 
     def _wants_caller_audio(self) -> bool:
         return (
@@ -647,3 +682,4 @@ class Session:
             if self.stt_session:
                 await self.stt_session.stop()
             await self._finalize_recording()
+            await self._extract_facts()

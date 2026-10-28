@@ -20,4 +20,6 @@ def test_provider_settings_use_expected_defaults() -> None:
     assert settings.text_to_speech_provider == "sarvam"
     assert settings.object_storage_provider == "unconfigured"
     assert settings.local_review_api_enabled is False
+    assert settings.demo_barge_in_enabled is True
+    assert settings.voice_barge_in_enabled is False
     assert settings.field_encryption_key == ""

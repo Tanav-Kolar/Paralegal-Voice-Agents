@@ -19,18 +19,25 @@ class SarvamConversationProvider:
         self._timeout = settings.sarvam_chat_timeout_seconds
 
     async def reply(self, messages: list[dict[str, str]]) -> ConversationReply:
+        content = await self.complete_json(
+            messages, "intake_reply", ConversationReply.model_json_schema(), 400
+        )
+        try:
+            return ConversationReply.model_validate(content)
+        except ValueError as error:
+            raise ConversationUnavailable("Sarvam did not return a usable response") from error
+
+    async def complete_json(
+        self, messages: list[dict[str, str]], name: str, schema: dict, max_tokens: int
+    ) -> dict:
         payload = {
             "model": self._model,
             "messages": messages,
-            "temperature": 0.3,
-            "max_tokens": 400,
+            "temperature": 0.3 if name == "intake_reply" else 0,
+            "max_tokens": max_tokens,
             "response_format": {
                 "type": "json_schema",
-                "json_schema": {
-                    "name": "intake_reply",
-                    "strict": True,
-                    "schema": ConversationReply.model_json_schema(),
-                },
+                "json_schema": {"name": name, "strict": True, "schema": schema},
             },
         }
         try:
@@ -44,7 +51,6 @@ class SarvamConversationProvider:
                 choice = response.json()["choices"][0]
                 if choice.get("finish_reason") != "stop":
                     raise ValueError("Incomplete model response")
-                content = choice["message"]["content"]
-                return ConversationReply.model_validate(json.loads(content))
+                return json.loads(choice["message"]["content"])
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
             raise ConversationUnavailable("Sarvam did not return a usable response") from error
