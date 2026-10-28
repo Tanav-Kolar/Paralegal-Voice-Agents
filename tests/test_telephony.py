@@ -8,7 +8,6 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from app.api.routes.telephony import HINDI_LANGUAGE_SELECTION_PROMPT, LANGUAGE_SELECTION_PROMPT
 from app.core.config import Settings, get_settings
 from app.db.mongodb import (
     get_call_events_collection,
@@ -23,7 +22,6 @@ from app.workflows.consent import (
     ENGLISH_CONSENT_PROMPT,
     ENGLISH_CONSENT_REPROMPT,
     ENGLISH_CONSENT_UNCLEAR_CLOSURE,
-    HINDI_CONSENT_DIALOGUE,
 )
 from app.workflows.conversation import ConversationReply, ConversationUnavailable
 
@@ -410,7 +408,7 @@ def test_exotel_voicebot_stream_resolves_database_dependency_for_websocket() -> 
             pass
 
 
-def test_exotel_voicebot_stream_relays_media_to_sarvam_stt_and_plays_language_prompt() -> None:
+def test_exotel_voicebot_stream_relays_media_and_plays_english_consent_prompt() -> None:
     client, events, stt_sessions, tts_providers = make_client()
     credentials = b64encode(f"{VOICEBOT_USERNAME}:{VOICEBOT_PASSWORD}".encode()).decode()
     with client:
@@ -421,7 +419,6 @@ def test_exotel_voicebot_stream_relays_media_to_sarvam_stt_and_plays_language_pr
         ) as websocket:
             websocket.send_json({"event": "start", "start": {"stream_sid": "stream-test-001"}})
             prompt_audio = websocket.receive_json()
-            websocket.receive_json()
             websocket.send_json({"event": "media", "media": {"payload": "cGNtLWF1ZGlv"}})
             websocket.send_json({"event": "stop"})
 
@@ -429,8 +426,8 @@ def test_exotel_voicebot_stream_relays_media_to_sarvam_stt_and_plays_language_pr
     assert stt_sessions[0].started is True
     assert stt_sessions[0].audio_payloads == ["cGNtLWF1ZGlv"]
     assert stt_sessions[0].stopped is True
-    assert tts_providers[0].texts == [LANGUAGE_SELECTION_PROMPT]
-    assert tts_providers[1].texts == [HINDI_LANGUAGE_SELECTION_PROMPT]
+    assert len(tts_providers) == 1
+    assert tts_providers[0].texts == [ENGLISH_CONSENT_PROMPT]
     assert prompt_audio == {
         "event": "media",
         "stream_sid": "stream-test-001",
@@ -454,14 +451,6 @@ def test_exotel_voicebot_stream_routes_final_consent_to_tts_response() -> None:
         ) as websocket:
             websocket.send_json({"event": "start", "start": {"stream_sid": "stream-consent-yes"}})
             websocket.receive_json()
-            websocket.receive_json()
-            stt_sessions[0].transcript_on_next_audio = (
-                "transcript.final",
-                "English",
-                "en-IN",
-            )
-            websocket.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
-            websocket.receive_json()
             stt_sessions[0].transcript_on_next_audio = (
                 "transcript.final",
                 "Yes, I consent.",
@@ -471,9 +460,8 @@ def test_exotel_voicebot_stream_routes_final_consent_to_tts_response() -> None:
             response_audio = websocket.receive_json()
             websocket.send_json({"event": "stop"})
 
-    assert tts_providers[0].texts == [LANGUAGE_SELECTION_PROMPT]
-    assert tts_providers[2].texts == [ENGLISH_CONSENT_PROMPT]
-    assert tts_providers[3].texts == [
+    assert tts_providers[0].texts == [ENGLISH_CONSENT_PROMPT]
+    assert tts_providers[1].texts == [
         f"{ENGLISH_CONSENT_GRANTED_RESPONSE} Please tell me more."
     ]
     assert response_audio == {
@@ -483,7 +471,6 @@ def test_exotel_voicebot_stream_routes_final_consent_to_tts_response() -> None:
     }
     assert [event["event_type"] for event in events.documents] == [
         "voicebot_stream_started",
-        "voicebot_language_selected",
         "voicebot_consent_granted",
         "voicebot_stream_stopped",
     ]
@@ -516,10 +503,6 @@ def test_exotel_voicebot_stream_stores_only_post_consent_audio_in_gcs(monkeypatc
             headers={"Authorization": f"Basic {credentials}"},
         ) as websocket:
             websocket.send_json({"event": "start", "start": {"stream_sid": "stream-recording"}})
-            websocket.receive_json()
-            websocket.receive_json()
-            stt_sessions[0].transcript_on_next_audio = ("transcript.final", "English", "en-IN")
-            websocket.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
             websocket.receive_json()
             stt_sessions[0].transcript_on_next_audio = (
                 "transcript.final",
@@ -566,14 +549,6 @@ def test_exotel_voicebot_stream_reprompts_then_stops_processing_unclear_consent(
                 {"event": "start", "start": {"stream_sid": "stream-consent-unclear"}}
             )
             websocket.receive_json()
-            websocket.receive_json()
-            stt_sessions[0].transcript_on_next_audio = (
-                "transcript.final",
-                "English",
-                "en-IN",
-            )
-            websocket.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
-            websocket.receive_json()
             stt_sessions[0].transcript_on_next_audio = (
                 "transcript.final",
                 "What is this about?",
@@ -589,18 +564,17 @@ def test_exotel_voicebot_stream_reprompts_then_stops_processing_unclear_consent(
             websocket.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
             closing_audio = websocket.receive_json()
 
-    assert tts_providers[3].texts == [ENGLISH_CONSENT_REPROMPT]
-    assert tts_providers[4].texts == [ENGLISH_CONSENT_UNCLEAR_CLOSURE]
+    assert tts_providers[1].texts == [ENGLISH_CONSENT_REPROMPT]
+    assert tts_providers[2].texts == [ENGLISH_CONSENT_UNCLEAR_CLOSURE]
     assert closing_audio["event"] == "media"
-    assert [event["event_type"] for event in events.documents[:4]] == [
+    assert [event["event_type"] for event in events.documents[:3]] == [
         "voicebot_stream_started",
-        "voicebot_language_selected",
         "voicebot_reprompt_consent",
         "voicebot_close_call",
     ]
 
 
-def test_exotel_voicebot_stream_uses_hindi_consent_dialogue() -> None:
+def test_hindi_consent_answer_keeps_agent_in_english() -> None:
     client, events, stt_sessions, tts_providers = make_client()
     credentials = b64encode(f"{VOICEBOT_USERNAME}:{VOICEBOT_PASSWORD}".encode()).decode()
     with client:
@@ -611,30 +585,21 @@ def test_exotel_voicebot_stream_uses_hindi_consent_dialogue() -> None:
         ) as websocket:
             websocket.send_json({"event": "start", "start": {"stream_sid": "stream-hindi-consent"}})
             websocket.receive_json()
-            websocket.receive_json()
             stt_sessions[0].transcript_on_next_audio = (
                 "transcript.final",
-                "हिंदी",
+                "हाँ",
                 "hi-IN",
             )
             websocket.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
             websocket.receive_json()
             websocket.send_json({"event": "stop"})
 
-    assert tts_providers[2].texts == [HINDI_CONSENT_DIALOGUE.prompt]
-    assert tts_providers[2].requests == [("hi-IN", "aparna_hi_customer")]
-    language_event = events.documents[1]
-    assert language_event["event_type"] == "voicebot_language_selected"
-    assert language_event["language"] == "hindi"
+    assert tts_providers[0].texts == [ENGLISH_CONSENT_PROMPT]
+    assert all(provider.requests == [("en-IN", "aparna_en_companion")] for provider in tts_providers)
+    assert events.intake_calls.documents[0]["language"]["preferred"] == "english"
 
 
-@pytest.mark.parametrize(
-    ("chosen", "expected_code", "expected_speaker"),
-    [("English", "en-IN", "aparna_en_companion"), ("हिंदी", "hi-IN", "aparna_hi_customer")],
-)
-def test_post_consent_mixed_language_details_are_encrypted_and_stored_once(
-    chosen, expected_code, expected_speaker
-) -> None:
+def test_post_consent_mixed_language_details_are_encrypted_and_stored_once() -> None:
     client, events, stt_sessions, tts_providers = make_client()
     credentials = b64encode(f"{VOICEBOT_USERNAME}:{VOICEBOT_PASSWORD}".encode()).decode()
     turns = [
@@ -657,10 +622,7 @@ def test_post_consent_mixed_language_details_are_encrypted_and_stored_once(
         ) as ws:
             ws.send_json({"event": "start", "start": {"stream_sid": "mixed-stream"}})
             ws.receive_json()
-            ws.receive_json()
-            for index, (utterance, detected) in enumerate(
-                [(chosen, "en-IN"), ("haan", "hi-IN"), *turns]
-            ):
+            for utterance, detected in [("haan", "hi-IN"), *turns]:
                 stt_sessions[0].transcript_on_next_audio = ("transcript.final", utterance, detected)
                 ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
                 ws.receive_json()
@@ -677,9 +639,9 @@ def test_post_consent_mixed_language_details_are_encrypted_and_stored_once(
     assert "Mera naam" not in str(intake)
     assert intake["facts"] == []
     assert len(agent_segments) == len(turns) + 1
-    assert all(s["detected_language"] == expected_code for s in agent_segments)
+    assert all(s["detected_language"] == "en-IN" for s in agent_segments)
     assert all(s["text_encrypted"].startswith("fernet:v1:") for s in agent_segments)
-    assert all(p.requests == [(expected_code, expected_speaker)] for p in tts_providers[2:])
+    assert all(p.requests == [("en-IN", "aparna_en_companion")] for p in tts_providers)
 
 
 def test_declined_consent_does_not_collect_post_consent_details() -> None:
@@ -692,14 +654,13 @@ def test_declined_consent_does_not_collect_post_consent_details() -> None:
         ) as ws:
             ws.send_json({"event": "start", "start": {"stream_sid": "declined-stream"}})
             ws.receive_json()
-            ws.receive_json()
-            for utterance in ["English", "no"]:
+            for utterance in ["no"]:
                 stt_sessions[0].transcript_on_next_audio = ("transcript.final", utterance, "en-IN")
                 ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
                 ws.receive_json()
             ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
             ws.send_json({"event": "stop"})
-    assert len(stt_sessions[0].audio_payloads) == 2
+    assert len(stt_sessions[0].audio_payloads) == 1
     assert events.intake_calls.documents[0]["intake"]["transcript_segments"] == []
     assert events.intake_calls.documents[0]["intake"]["facts"] == []
     assert events.conversation_provider.requests == []
@@ -716,8 +677,7 @@ def test_general_intake_preserves_answers_without_inventing_facts() -> None:
         ) as ws:
             ws.send_json({"event": "start", "start": {"stream_sid": "general-stream"}})
             ws.receive_json()
-            ws.receive_json()
-            for index, utterance in enumerate(["हिंदी", "yes", *turns]):
+            for utterance in ["yes", *turns]:
                 stt_sessions[0].transcript_on_next_audio = ("transcript.final", utterance, "hi-IN")
                 ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
                 ws.receive_json()
@@ -749,8 +709,7 @@ def test_conversation_provider_failure_stops_intake_and_keeps_previous_transcrip
         ) as ws:
             ws.send_json({"event": "start", "start": {"stream_sid": "model-failure-stream"}})
             ws.receive_json()
-            ws.receive_json()
-            for index, utterance in enumerate(["English", "yes", "A private response"]):
+            for utterance in ["yes", "A private response"]:
                 stt_sessions[0].transcript_on_next_audio = ("transcript.final", utterance, "en-IN")
                 ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
                 ws.receive_json()
@@ -776,10 +735,9 @@ def test_duplicate_start_event_is_ignored() -> None:
         with _stream(client, "dup-start", "s1") as ws:
             ws.send_json({"event": "start", "start": {"stream_sid": "s1"}})
             ws.receive_json()
-            ws.receive_json()
             ws.send_json({"event": "start", "start": {"stream_sid": "s2"}})
             ws.send_json({"event": "stop"})
-    assert len(stt_sessions) == 1 and len(tts_providers) == 2
+    assert len(stt_sessions) == 1 and len(tts_providers) == 1
 
 
 def test_outbound_audio_frames_are_sample_aligned(monkeypatch) -> None:
@@ -813,7 +771,7 @@ def test_unexpected_turn_failure_ends_the_call_instead_of_silently_stalling(monk
     def failing_after_prompts(settings):
         nonlocal prompts_spoken
         prompts_spoken += 1
-        if prompts_spoken > 2:
+        if prompts_spoken > 1:
             raise RuntimeError("tts exploded")
         return original(settings)
 
@@ -822,8 +780,7 @@ def test_unexpected_turn_failure_ends_the_call_instead_of_silently_stalling(monk
         with _stream(client, "turn-failure", "s1") as ws:
             ws.send_json({"event": "start", "start": {"stream_sid": "s1"}})
             ws.receive_json()
-            ws.receive_json()
-            stt_sessions[0].transcript_on_next_audio = ("transcript.final", "English", "en-IN")
+            stt_sessions[0].transcript_on_next_audio = ("transcript.final", "yes", "en-IN")
             ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
     assert any(e["event_type"] == "voicebot_turn_failed" for e in events.documents)
 
@@ -868,9 +825,7 @@ def test_barge_in_stops_the_agent_and_clears_buffered_audio(monkeypatch) -> None
             assert ws.receive_json() == {"event": "clear", "stream_sid": "s1"}
             ws.send_json({"event": "stop"})
             assert ws.receive()["type"] == "websocket.close"
-    # The Hindi half of the opening prompt is dropped along with the interrupted English half.
-    assert streamed[0] == LANGUAGE_SELECTION_PROMPT
-    assert HINDI_LANGUAGE_SELECTION_PROMPT not in streamed
+    assert streamed[0] == ENGLISH_CONSENT_PROMPT
     assert any(e["event_type"] == "voicebot_agent_interrupted" for e in events.documents)
 
 
@@ -879,14 +834,13 @@ def test_final_transcript_also_interrupts_agent(monkeypatch) -> None:
     with client, _stream(client, "final-barge-in", "s1") as ws:
         ws.send_json({"event": "start", "start": {"stream_sid": "s1"}})
         assert ws.receive_json()["event"] == "media"
-        stt_sessions[0].transcript_on_next_audio = ("transcript.final", "English", "en-IN")
+        stt_sessions[0].transcript_on_next_audio = ("transcript.final", "yes", "en-IN")
         ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
         assert ws.receive_json() == {"event": "clear", "stream_sid": "s1"}
         ws.send_json({"event": "stop"})
         while ws.receive()["type"] != "websocket.close":
             pass
-    assert streamed[0] == LANGUAGE_SELECTION_PROMPT
-    assert HINDI_LANGUAGE_SELECTION_PROMPT not in streamed
+    assert streamed[0] == ENGLISH_CONSENT_PROMPT
     assert any(e["event_type"] == "voicebot_agent_interrupted" for e in events.documents)
 
 
@@ -896,7 +850,7 @@ def test_agent_echo_does_not_trigger_barge_in(monkeypatch) -> None:
         ws.send_json({"event": "start", "start": {"stream_sid": "s1"}})
         assert ws.receive_json()["event"] == "media"
         stt_sessions[0].transcript_on_next_audio = (
-            "transcript.partial", "To speak in English", "en-IN"
+            "transcript.partial", "I can take some initial details", "en-IN"
         )
         ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
         ws.send_json({"event": "stop"})

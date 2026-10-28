@@ -41,11 +41,7 @@ from app.security.field_encryption import FieldEncryptor, get_field_encryptor
 from app.services.audit import record_intake_creation_audit_events
 from app.services.call_events import record_event
 from app.services.intake_encryption import encrypt_intake_call
-from app.voice.session import (  # noqa: F401  (prompts are re-exported for callers and tests)
-    HINDI_LANGUAGE_SELECTION_PROMPT,
-    LANGUAGE_SELECTION_PROMPT,
-    Session,
-)
+from app.voice.session import Session
 from app.voice.transport import ExotelTransport, Transport
 from app.workflows.conversation import (
     ConversationProvider,

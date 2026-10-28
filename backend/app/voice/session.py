@@ -45,42 +45,12 @@ from app.workflows.conversation import (
     ConversationUnavailable,
     ConversationWorkflow,
 )
-from app.workflows.language import (
-    LanguageSelectionAction,
-    LanguageSelectionState,
-    LanguageSelectionWorkflow,
-)
 
 logger = logging.getLogger(__name__)
 
-LANGUAGE_SELECTION_PROMPT = (
-    "Hello. To speak in English, say English."
+CONVERSATION_UNAVAILABLE = (
+    "I am unable to continue the intake right now. Thank you for calling. Goodbye."
 )
-HINDI_LANGUAGE_SELECTION_PROMPT = (
-    "हिंदी में बात करने के लिए हिंदी कहें।"
-)
-LANGUAGE_SELECTION_REPROMPT = "Please say English or Hindi."
-HINDI_LANGUAGE_SELECTION_REPROMPT = "कृपया अंग्रेज़ी या हिंदी कहें।"
-LANGUAGE_SELECTION_UNCLEAR_CLOSURE = (
-    "I was unable to confirm your language choice, so I will not collect case information. "
-    "Thank you for calling. Goodbye."
-)
-HINDI_LANGUAGE_SELECTION_UNCLEAR_CLOSURE = (
-    "मैं आपकी भाषा की पुष्टि नहीं कर सकी, इसलिए मामले की जानकारी नहीं लूँगी। धन्यवाद। नमस्ते।"
-)
-CONVERSATION_UNAVAILABLE = {
-    LanguageChoice.ENGLISH: (
-        "I am unable to continue the intake right now. Thank you for calling. Goodbye."
-    ),
-    LanguageChoice.HINDI: "मैं अभी इंटेक आगे नहीं बढ़ा सकती। कॉल करने के लिए धन्यवाद। नमस्ते।",
-}
-
-
-def speaker_for_language(settings: Settings, language: LanguageChoice) -> str:
-    return {
-        LanguageChoice.ENGLISH: settings.sarvam_tts_speaker,
-        LanguageChoice.HINDI: settings.sarvam_tts_hindi_speaker,
-    }[language]
 
 
 async def record_voicebot_session_event(
@@ -168,7 +138,6 @@ class Session:
 
         self.stream_sid: str | None = None
         self.stt_session: StreamingSpeechToTextSession | None = None
-        self.language_workflow = LanguageSelectionWorkflow()
         self.consent_workflow = ConsentWorkflow()
         self.speech_lock = asyncio.Lock()
         # Turns (and the opening prompt, as None) run on a worker so the STT receiver and the
@@ -180,15 +149,12 @@ class Session:
         self._agent_audio_until = 0.0
         self._turn_interrupted = False
         self._hung_up = False
-        self.selected_dialogue: ConsentDialogue | None = None
+        self.selected_dialogue: ConsentDialogue = get_consent_dialogue(LanguageChoice.ENGLISH)
         self.recording_provider: ObjectStorageProvider | None = None
         self.recorder: ConsentGatedCallRecorder | None = None
         self.recording_finalized = False
         self.conversation: ConversationWorkflow | None = None
         self.started_at = monotonic()
-
-    def _speaker(self, language: LanguageChoice) -> str:
-        return speaker_for_language(self.settings, language)
 
     async def _session_event(self, event_type: str, **fields: object) -> None:
         await record_voicebot_session_event(
@@ -343,7 +309,7 @@ class Session:
 
     async def _greet(self) -> None:
         try:
-            await self._speak_language_prompt()
+            await self._begin_english_consent()
         except (OSError, ValueError):
             logger.exception("voicebot_session_start_failed stream_sid=%s", self.stream_sid)
             await self._session_event("voicebot_stt_start_failed")
@@ -354,9 +320,6 @@ class Session:
             await asyncio.wait_for(self._turns.join(), timeout=10)
 
     async def _handle_transcript(self, transcript: str, language: str | None) -> None:
-        if self.language_workflow.state == LanguageSelectionState.AWAITING_SELECTION:
-            await self._handle_language_response(transcript)
-            return
         if self.consent_workflow.state == ConsentState.GRANTED and self.conversation:
             await self._handle_conversation_response(transcript, language)
             return
@@ -369,54 +332,20 @@ class Session:
             return
         await self._handle_consent_response(transcript)
 
-    async def _handle_language_response(self, transcript: str) -> None:
-        action = self.language_workflow.handle_response(transcript)
-        if action == LanguageSelectionAction.REPROMPT_LANGUAGE:
-            await self._session_event("voicebot_reprompt_language")
-            await self.speak(
-                LANGUAGE_SELECTION_REPROMPT,
-                language_code="en-IN",
-                speaker=self._speaker(LanguageChoice.ENGLISH),
-            )
-            await self.speak(
-                HINDI_LANGUAGE_SELECTION_REPROMPT,
-                language_code="hi-IN",
-                speaker=self._speaker(LanguageChoice.HINDI),
-            )
-            return
-        if action == LanguageSelectionAction.CLOSE_CALL:
-            await self._session_event("voicebot_close_call")
-            await self._update_call(status=CallStatus.ABANDONED.value)
-            await self.speak(
-                LANGUAGE_SELECTION_UNCLEAR_CLOSURE,
-                language_code="en-IN",
-                speaker=self._speaker(LanguageChoice.ENGLISH),
-            )
-            await self.speak(
-                HINDI_LANGUAGE_SELECTION_UNCLEAR_CLOSURE,
-                language_code="hi-IN",
-                speaker=self._speaker(LanguageChoice.HINDI),
-            )
-            return
-
-        selected_language = self.language_workflow.selected_language
-        if selected_language is None:
-            raise RuntimeError("Language selection completed without a selected language")
-        self.selected_dialogue = get_consent_dialogue(selected_language)
-        await self._session_event("voicebot_language_selected", language=selected_language)
+    async def _begin_english_consent(self) -> None:
+        self.consent_workflow.begin()
         await self._update_call(
             **{
-                "language.preferred": selected_language.value,
+                "language.preferred": LanguageChoice.ENGLISH.value,
                 "disclosures.recording_disclosure_given_at": datetime.now(UTC),
                 "disclosures.no_advice_disclosure_given_at": datetime.now(UTC),
                 "disclosures.no_engagement_disclosure_given_at": datetime.now(UTC),
             }
         )
-        self.consent_workflow.begin()
         await self.speak(
             self.selected_dialogue.prompt,
             language_code=self.selected_dialogue.language_code,
-            speaker=self._speaker(selected_language),
+            speaker=self.settings.sarvam_tts_speaker,
         )
 
     async def _handle_conversation_response(self, transcript: str, language: str | None) -> None:
@@ -456,15 +385,15 @@ class Session:
             await self._session_event("voicebot_conversation_unavailable")
             await self._update_call(status=CallStatus.ABANDONED.value)
             await self.speak(
-                CONVERSATION_UNAVAILABLE[conversation.language],
+                CONVERSATION_UNAVAILABLE,
                 language_code=dialogue.language_code,
-                speaker=self._speaker(conversation.language),
+                speaker=self.settings.sarvam_tts_speaker,
             )
             return
         await self.speak(
             conversation_reply.reply,
             language_code=dialogue.language_code,
-            speaker=self._speaker(conversation.language),
+            speaker=self.settings.sarvam_tts_speaker,
         )
         if conversation.finished:
             await self._update_call(status=CallStatus.COMPLETED.value)
@@ -472,8 +401,6 @@ class Session:
     async def _handle_consent_response(self, transcript: str) -> None:
         action = self.consent_workflow.handle_response(transcript)
         dialogue = self.selected_dialogue
-        if dialogue is None:
-            raise RuntimeError("Consent response received without a selected language")
         response = {
             ConsentAction.REPROMPT_CONSENT: dialogue.reprompt,
             ConsentAction.CONSENT_GRANTED: dialogue.granted_response,
@@ -521,7 +448,7 @@ class Session:
             if action == ConsentAction.CONSENT_GRANTED:
                 try:
                     self.conversation = ConversationWorkflow(
-                        self.language_workflow.selected_language,
+                        LanguageChoice.ENGLISH,
                         self._create_conversation(self.settings),
                     )
                     first_reply = await self.conversation.begin()
@@ -531,11 +458,11 @@ class Session:
                         self.conversation.finished = True
                     await self._session_event("voicebot_conversation_unavailable")
                     await self._update_call(status=CallStatus.ABANDONED.value)
-                    response = CONVERSATION_UNAVAILABLE[self.language_workflow.selected_language]
+                    response = CONVERSATION_UNAVAILABLE
             await self.speak(
                 response,
                 language_code=dialogue.language_code,
-                speaker=self._speaker(self.language_workflow.selected_language),
+                speaker=self.settings.sarvam_tts_speaker,
             )
         except (OSError, ValueError):
             logger.exception(
@@ -555,20 +482,6 @@ class Session:
         except (OSError, ValueError):
             logger.exception("voicebot_recording_start_failed stream_sid=%s", self.stream_sid)
             await self._session_event("voicebot_recording_start_failed")
-
-    async def _speak_language_prompt(self) -> None:
-        if self.language_workflow.begin() != LanguageSelectionAction.REQUEST_LANGUAGE:
-            return
-        await self.speak(
-            LANGUAGE_SELECTION_PROMPT,
-            language_code="en-IN",
-            speaker=self._speaker(LanguageChoice.ENGLISH),
-        )
-        await self.speak(
-            HINDI_LANGUAGE_SELECTION_PROMPT,
-            language_code="hi-IN",
-            speaker=self._speaker(LanguageChoice.HINDI),
-        )
 
     async def _finalize_recording(self) -> None:
         if self.recording_finalized or not self.recording_provider or not self.recorder:
@@ -648,8 +561,7 @@ class Session:
 
     def _wants_caller_audio(self) -> bool:
         return (
-            self.language_workflow.state == LanguageSelectionState.AWAITING_SELECTION
-            or self.consent_workflow.state == ConsentState.AWAITING_CONSENT
+            self.consent_workflow.state == ConsentState.AWAITING_CONSENT
             or (
                 self.consent_workflow.state == ConsentState.GRANTED
                 and self.conversation is not None

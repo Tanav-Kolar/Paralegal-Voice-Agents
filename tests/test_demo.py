@@ -56,18 +56,16 @@ def test_demo_session_streams_the_same_intake_pipeline() -> None:
             assert websocket.receive_json()["type"] == "transcript"
             assert websocket.receive_bytes()
             assert websocket.receive_json()["type"] == "agent_transcript_done"
-            assert websocket.receive_json()["type"] == "transcript"
-            websocket.receive_bytes()
             websocket.send_text("stop")
 
     call = events.intake_calls.documents[0]
     assert call["telephony"]["provider"] == "demo"
     assert call["id"] == session["intakeCallId"]
-    assert len(stt_sessions) == 1 and len(tts_providers) == 2
+    assert len(stt_sessions) == 1 and len(tts_providers) == 1
     assert events.documents and {e["provider"] for e in events.documents} == {"demo"}
 
 
-def test_demo_barge_in_is_enabled_by_default(monkeypatch) -> None:
+def test_demo_ignores_microphone_audio_while_agent_speaks_by_default(monkeypatch) -> None:
     import asyncio
 
     from app.api.routes import telephony
@@ -79,6 +77,33 @@ def test_demo_barge_in_is_enabled_by_default(monkeypatch) -> None:
             await asyncio.sleep(30)
 
     client, events, stt_sessions, _ = make_demo_client()
+    monkeypatch.setattr(telephony, "_create_tts_provider", lambda settings: SlowTts())
+    with client:
+        login(client)
+        path = client.post("/api/v1/demo/session").json()["streamPath"]
+        with client.websocket_connect(path) as websocket:
+            assert websocket.receive_json()["speaker"] == "agent"
+            assert websocket.receive_bytes() == b"ab"
+            stt_sessions[0].transcript_on_next_audio = ("transcript.partial", "English", "en-IN")
+            websocket.send_bytes(b"caller")
+            websocket.send_text("stop")
+            assert websocket.receive()["type"] == "websocket.close"
+    assert stt_sessions[0].audio_payloads == []
+    assert not any(event["event_type"] == "voicebot_agent_interrupted" for event in events.documents)
+
+
+def test_demo_can_enable_barge_in_explicitly(monkeypatch) -> None:
+    import asyncio
+
+    from app.api.routes import telephony
+    from app.providers.contracts import SpeechAudio
+
+    class SlowTts:
+        async def stream(self, text, *, language_code=None, speaker=None):
+            yield SpeechAudio(content=b"ab", content_type="audio/L16")
+            await asyncio.sleep(30)
+
+    client, events, stt_sessions, _ = make_demo_client(demo_barge_in_enabled=True)
     monkeypatch.setattr(telephony, "_create_tts_provider", lambda settings: SlowTts())
     with client:
         login(client)

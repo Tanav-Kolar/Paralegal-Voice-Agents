@@ -54,7 +54,7 @@ export function CallPanel({ onFinished }: { onFinished: () => void }) {
   const status = state === "connecting" ? "Connecting…" : state === "live" ? agentSpeaking ? "Agent speaking — please wait" : callerSpeaking ? "Listening to you" : "Listening" : state === "ended" ? "Call ended" : "Ready";
 
   return <section className="call-panel" aria-label="Try the intake agent">
-    <header className="call-intro"><div><p className="call-kicker">Live conversation</p><h1>Try the intake agent</h1></div><p>Speak naturally. Choose a language, give consent, and wait until the agent finishes before replying.</p></header>
+    <header className="call-intro"><div><p className="call-kicker">Live conversation</p><h1>Try the intake agent</h1></div><p>Speak naturally in English. Give consent, then wait until the agent finishes before replying.</p></header>
     <div className="call-room">
       <section className="call-stage" aria-label="Call controls">
         <div className={`speaker-orb agent-orb ${agentSpeaking ? "speaking" : ""}`}><span className="orb-label">Agent</span><Waveform active={agentSpeaking && agentLevel > 0} tone="agent" /></div>
