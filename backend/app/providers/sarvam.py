@@ -50,6 +50,7 @@ class SarvamRealtimeSpeechToTextSession:
             "encoding": "linear16",
             "sample_rate": settings.sarvam_stt_sample_rate,
             "endpointing": "vad",
+            "silence_duration_ms": settings.sarvam_stt_silence_duration_ms,
         }
 
     async def start(self) -> None:

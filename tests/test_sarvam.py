@@ -37,6 +37,7 @@ async def test_sarvam_realtime_stt_relays_audio_and_final_transcript() -> None:
     async def connect_to_sarvam(url: str, **kwargs) -> FakeSarvamConnection:
         assert "sample_rate=8000" in url
         assert "encoding=linear16" in url
+        assert "silence_duration_ms=1800" in url
         assert kwargs["additional_headers"] == {"api-subscription-key": "test-key"}
         return connection
 

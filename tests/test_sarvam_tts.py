@@ -56,7 +56,7 @@ async def test_sarvam_streaming_tts_returns_linear16_audio_chunks() -> None:
         {
             "type": "config",
             "data": {
-                "speaker": "aparna_en_companion",
+                "speaker": "simran_en_customer",
                 "language_code": "en-IN",
                 "speech_sample_rate": 8000,
                 "output_audio_codec": "linear16",

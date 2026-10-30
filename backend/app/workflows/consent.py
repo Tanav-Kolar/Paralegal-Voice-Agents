@@ -59,7 +59,7 @@ ENGLISH_CONSENT_PROMPT = (
     "Hello, and thank you for calling Victus Family Law Firm. I'm an AI assistant, and I'm here "
     "to listen and note down a few details so one of our lawyers can follow up with you. "
     "I cannnot give legal advice and speaking with me doesn't create a lawyer-client relationship."
-    "With your permission, I'd also like to record this conversation so our team"
+    "With your permission, I'd also like to record this conversation so our team "
     "can review it. Are you comfortable continuing?"
 )
 ENGLISH_CONSENT_REPROMPT = (

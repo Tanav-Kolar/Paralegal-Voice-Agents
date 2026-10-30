@@ -36,9 +36,14 @@ The caller has already heard the mandatory disclosures and consented to proceed.
 Your role is to gather the caller's account for a lawyer, not to act as a lawyer.
 
 Speak in {agent_language} throughout. The caller may speak English, Hindi, or a mixture;
-understand their language without switching your own spoken language. Sound like a calm,
-attentive person on a phone call. Use everyday words, short sentences, and natural phrasing.
+understand their language without switching your own spoken language. Sound calm, measured,
+and respectful, especially when the caller discusses loss or distress. Never sound upbeat,
+cheerful, excited, or overly familiar. Use everyday words, short sentences, and natural phrasing.
 Avoid forms language, repeated greetings, stock sympathy, and announcing each step of intake.
+Do not begin replies with filler acknowledgments such as "I see", "I understand", "Got it",
+"Okay", or "Alright". Often move straight to the next question.
+The system has already thanked the caller for consenting. Begin the intake with a question;
+do not thank them again. Avoid routine thanks after later answers too.
 Usually reply in one or two sentences. Ask one clear question at a time, then leave room for an
 answer. Briefly acknowledge what the caller said when it helps, and move to the most useful next
 question. Do not repeat their account back after every answer or ask for a detail already given.
@@ -70,6 +75,15 @@ the conversation has reached its closing response. Do not include notes, markdow
 
 _CAPITALIZED_WORD = re.compile(r"\b[A-Z][a-z]+\b")
 _NUMBER = re.compile(r"\b\d+(?:[./-]\d+)*\b")
+_FILLER_ACKNOWLEDGMENT = re.compile(
+    r"^\s*(?:I see|I understand|Got it|Okay|Alright)[^.!?]*[.!?]\s*",
+    re.IGNORECASE,
+)
+_FILLER_ONLY = {"i see", "i understand", "got it", "okay", "alright"}
+_OPENING_THANKS = re.compile(
+    r"^\s*(?:(?:thank you|thanks)(?:\s+for\s+[^.!?,]+)?(?:[.!?,]\s*|$))+",
+    re.IGNORECASE,
+)
 _ORDINARY_CAPITALIZED = {
     "And", "Are", "Before", "Can", "Could", "Did", "Do", "Does", "For", "Goodbye",
     "Have", "How", "If", "Is", "It", "Please", "So", "Tell", "Thank", "That",
@@ -123,7 +137,16 @@ class ConversationWorkflow:
             raise ConversationUnavailable("Conversation exceeded the context limit")
         self._messages.append(message)
         result = await self._provider.reply(list(self._messages))
-        if _introduces_unstated_detail(result.reply, self._caller_speech):
+        spoken_reply = _FILLER_ACKNOWLEDGMENT.sub("", result.reply).strip()
+        if not self._caller_speech:
+            spoken_reply = _OPENING_THANKS.sub("", spoken_reply).strip()
+            if spoken_reply:
+                spoken_reply = spoken_reply[0].upper() + spoken_reply[1:]
+        if (
+            not spoken_reply
+            or spoken_reply.casefold().rstrip(".!?") in _FILLER_ONLY
+            or _introduces_unstated_detail(spoken_reply, self._caller_speech)
+        ):
             fallback = (
                 "What brought you to the firm?"
                 if not self._caller_speech
@@ -139,6 +162,8 @@ class ConversationWorkflow:
                 reply=fallback,
                 finished=False,
             )
+        else:
+            result = result.model_copy(update={"reply": spoken_reply})
         self._messages.append({"role": "assistant", "content": result.reply})
         self.finished = result.finished
         return result

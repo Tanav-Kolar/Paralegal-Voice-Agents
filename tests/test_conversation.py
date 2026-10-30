@@ -95,3 +95,41 @@ async def test_conversation_first_question_cannot_introduce_a_case_detail():
     response = await workflow.begin()
 
     assert response.reply == "What brought you to the firm?"
+
+
+@pytest.mark.asyncio
+async def test_conversation_drops_cheerful_filler_before_the_question():
+    class Provider:
+        async def reply(self, messages):
+            if len(messages) == 2:
+                return ConversationReply(reply="What brought you to the firm?", finished=False)
+            return ConversationReply(
+                reply="I see. What happened next?", finished=False
+            )
+
+    workflow = ConversationWorkflow(LanguageChoice.ENGLISH, Provider())
+    await workflow.begin()
+    response = await workflow.handle_response("My mother passed away recently.")
+
+    assert response.reply == "What happened next?"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "opening",
+    [
+        "Thank you. Thank you for that. What brings you to us today?",
+        "Thank you for that. What brings you to us today?",
+        "Thanks, what brings you to us today?",
+    ],
+)
+async def test_opening_does_not_repeat_the_consent_thanks(opening):
+    class Provider:
+        async def reply(self, messages):
+            return ConversationReply(reply=opening, finished=False)
+
+    workflow = ConversationWorkflow(LanguageChoice.ENGLISH, Provider())
+    response = await workflow.begin()
+
+    assert response.reply == "What brings you to us today?"
+    assert workflow._messages[-1]["content"] == response.reply
