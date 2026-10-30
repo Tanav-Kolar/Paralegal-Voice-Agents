@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     sarvam_stt_silence_duration_ms: int = Field(default=1800, ge=500, le=5000)
     sarvam_tts_model: str = "bulbul:v4-flash"
     sarvam_tts_language_code: str = "en-IN"
-    sarvam_tts_speaker: str = "simran_en_customer"
+    sarvam_tts_speaker: str = "aparna_en_companion"
     sarvam_tts_hindi_speaker: str = "aparna_hi_customer"
     sarvam_tts_sample_rate: int = 8000
     object_storage_provider: str = "unconfigured"

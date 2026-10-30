@@ -23,5 +23,5 @@ def test_provider_settings_use_expected_defaults() -> None:
     assert settings.demo_barge_in_enabled is False
     assert settings.voice_barge_in_enabled is True
     assert settings.sarvam_stt_silence_duration_ms == 1800
-    assert settings.sarvam_tts_speaker == "simran_en_customer"
+    assert settings.sarvam_tts_speaker == "aparna_en_companion"
     assert settings.field_encryption_key == ""

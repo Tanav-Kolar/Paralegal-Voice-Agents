@@ -133,3 +133,49 @@ async def test_opening_does_not_repeat_the_consent_thanks(opening):
 
     assert response.reply == "What brings you to us today?"
     assert workflow._messages[-1]["content"] == response.reply
+
+
+@pytest.mark.asyncio
+async def test_conversation_keeps_a_pointed_question_about_the_callers_matter():
+    class Provider:
+        async def reply(self, messages):
+            if len(messages) == 2:
+                return ConversationReply(reply="What brought you to the firm?", finished=False)
+            return ConversationReply(
+                reply="Has your brother said what he wants done with the flat?",
+                finished=False,
+            )
+
+    workflow = ConversationWorkflow(LanguageChoice.ENGLISH, Provider())
+    await workflow.begin()
+    response = await workflow.handle_response(
+        "My brother and I disagree about our mother's flat."
+    )
+
+    assert response.reply == "Has your brother said what he wants done with the flat?"
+
+
+@pytest.mark.asyncio
+async def test_unsafe_draft_is_retried_with_a_specific_grounded_question():
+    class Provider:
+        def __init__(self):
+            self.calls = 0
+
+        async def reply(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return ConversationReply(reply="What brought you to the firm?", finished=False)
+            if self.calls == 2:
+                return ConversationReply(reply="Is the flat in Bandra?", finished=False)
+            return ConversationReply(
+                reply="Where is the flat you mentioned?", finished=False
+            )
+
+    provider = Provider()
+    workflow = ConversationWorkflow(LanguageChoice.ENGLISH, provider)
+    await workflow.begin()
+    response = await workflow.handle_response("My brother and I disagree about a flat.")
+
+    assert provider.calls == 3
+    assert response.reply == "Where is the flat you mentioned?"
+    assert "Bandra" not in str(workflow._messages)

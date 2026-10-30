@@ -36,9 +36,9 @@ The caller has already heard the mandatory disclosures and consented to proceed.
 Your role is to gather the caller's account for a lawyer, not to act as a lawyer.
 
 Speak in {agent_language} throughout. The caller may speak English, Hindi, or a mixture;
-understand their language without switching your own spoken language. Sound calm, measured,
-and respectful, especially when the caller discusses loss or distress. Never sound upbeat,
-cheerful, excited, or overly familiar. Use everyday words, short sentences, and natural phrasing.
+understand their language without switching your own spoken language. Sound warm, patient, and
+attentive, with a restrained tone when the caller discusses loss or distress. Avoid breezy or
+cheerful stock phrases. Use everyday words, short sentences, and natural phrasing.
 Avoid forms language, repeated greetings, stock sympathy, and announcing each step of intake.
 Do not begin replies with filler acknowledgments such as "I see", "I understand", "Got it",
 "Okay", or "Alright". Often move straight to the next question.
@@ -46,7 +46,9 @@ The system has already thanked the caller for consenting. Begin the intake with 
 do not thank them again. Avoid routine thanks after later answers too.
 Usually reply in one or two sentences. Ask one clear question at a time, then leave room for an
 answer. Briefly acknowledge what the caller said when it helps, and move to the most useful next
-question. Do not repeat their account back after every answer or ask for a detail already given.
+question about their particular situation. Do not default to generic questions when the caller
+has supplied a specific topic. Do not repeat their account back after every answer or ask for a
+detail already given.
 Only clarify a detail the caller has already stated, when it matters and is genuinely unclear.
 Never suggest a name, date, location, relationship, or event for the caller to confirm unless
 the caller has already supplied that exact detail during this call. If a detail is missing,
@@ -59,6 +61,10 @@ kind of matter; the caller's account and timeline; relevant proceedings and orde
 want help with. For divorce or separation, explore relevant marriage, separation and living
 arrangements. Follow the caller's account rather than mechanically following this list. If another
 type of family matter is described, collect general information without guessing its classification.
+For inheritance, succession, wills, or family-property matters, follow what the caller has said
+about the person, property, relatives, documents, disagreements, and any proceedings. Ask a
+focused next question about a detail they mentioned; do not presume a will, ownership, or an
+existing dispute merely because of the matter type.
 Ask about missing details only when useful. Start with an open question about what brought them
 to the firm; do not start with a checklist. Do not suggest facts to the caller. Offer a brief recap
 only when you can accurately attribute it to the caller, and allow corrections. Wrap up when the
@@ -93,12 +99,16 @@ _ORDINARY_CAPITALIZED = {
 
 
 def _introduces_unstated_detail(reply: str, caller_speech: list[str]) -> bool:
-    """Fail closed on newly introduced names, places, dates, and numeric details."""
+    """Reject novel names and numbers without mistaking sentence openings for names."""
     stated = " ".join(caller_speech).casefold()
     stated_words = set(re.findall(r"\b\w+\b", stated))
     for match in _CAPITALIZED_WORD.finditer(reply):
         word = match.group()
-        if word not in _ORDINARY_CAPITALIZED and word.casefold() not in stated_words:
+        if word in _ORDINARY_CAPITALIZED or word.casefold() in stated_words:
+            continue
+        before = reply[: match.start()].rstrip()
+        at_sentence_start = not before or before[-1] in ".!?"
+        if not at_sentence_start or reply[match.end() :].lstrip().startswith(("?", ",")):
             return True
     return any(match.group() not in stated for match in _NUMBER.finditer(reply))
 
@@ -136,17 +146,37 @@ class ConversationWorkflow:
         if sum(len(item["content"]) for item in self._messages) + len(message["content"]) > 48_000:
             raise ConversationUnavailable("Conversation exceeded the context limit")
         self._messages.append(message)
-        result = await self._provider.reply(list(self._messages))
-        spoken_reply = _FILLER_ACKNOWLEDGMENT.sub("", result.reply).strip()
-        if not self._caller_speech:
-            spoken_reply = _OPENING_THANKS.sub("", spoken_reply).strip()
-            if spoken_reply:
-                spoken_reply = spoken_reply[0].upper() + spoken_reply[1:]
-        if (
-            not spoken_reply
-            or spoken_reply.casefold().rstrip(".!?") in _FILLER_ONLY
-            or _introduces_unstated_detail(spoken_reply, self._caller_speech)
-        ):
+        draft = await self._provider.reply(list(self._messages))
+        safe_result: ConversationReply | None = None
+        for attempt in range(2):
+            spoken_reply = _FILLER_ACKNOWLEDGMENT.sub("", draft.reply).strip()
+            if not self._caller_speech:
+                spoken_reply = _OPENING_THANKS.sub("", spoken_reply).strip()
+                if spoken_reply:
+                    spoken_reply = spoken_reply[0].upper() + spoken_reply[1:]
+            if (
+                spoken_reply
+                and spoken_reply.casefold().rstrip(".!?") not in _FILLER_ONLY
+                and not _introduces_unstated_detail(spoken_reply, self._caller_speech)
+            ):
+                safe_result = draft.model_copy(update={"reply": spoken_reply})
+                break
+            if attempt == 0:
+                retry_messages = [
+                    {
+                        "role": "system",
+                        "content": self._messages[0]["content"]
+                        + "\nRevise your answer: ask a focused question grounded only in what "
+                        "the caller said. Do not introduce a name or specific detail the "
+                        "caller did not state, and skip routine acknowledgments.",
+                    },
+                    *self._messages[1:],
+                ]
+                try:
+                    draft = await self._provider.reply(retry_messages)
+                except ConversationUnavailable:
+                    break
+        if safe_result is None:
             fallback = (
                 "What brought you to the firm?"
                 if not self._caller_speech
@@ -163,7 +193,7 @@ class ConversationWorkflow:
                 finished=False,
             )
         else:
-            result = result.model_copy(update={"reply": spoken_reply})
+            result = safe_result
         self._messages.append({"role": "assistant", "content": result.reply})
         self.finished = result.finished
         return result

@@ -596,7 +596,7 @@ def test_hindi_consent_answer_keeps_agent_in_english() -> None:
 
     assert tts_providers[0].texts == [ENGLISH_CONSENT_PROMPT]
     assert all(
-        provider.requests == [("en-IN", "simran_en_customer")]
+        provider.requests == [("en-IN", "aparna_en_companion")]
         for provider in tts_providers
     )
     assert events.intake_calls.documents[0]["language"]["preferred"] == "english"
@@ -644,7 +644,7 @@ def test_post_consent_mixed_language_details_are_encrypted_and_stored_once() -> 
     assert len(agent_segments) == len(turns) + 1
     assert all(s["detected_language"] == "en-IN" for s in agent_segments)
     assert all(s["text_encrypted"].startswith("fernet:v1:") for s in agent_segments)
-    assert all(p.requests == [("en-IN", "simran_en_customer")] for p in tts_providers)
+    assert all(p.requests == [("en-IN", "aparna_en_companion")] for p in tts_providers)
 
 
 def test_declined_consent_does_not_collect_post_consent_details() -> None:
