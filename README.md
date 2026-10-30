@@ -8,7 +8,7 @@ FastAPI foundation for an AI-assisted, consent-first family-law lead-intake serv
 - A consent-first voice intake agent: English introduction and recording/intake consent, then a Sarvam-driven
   conversation. Caller transcripts are encrypted per field; audio is recorded to private storage only
   after consent.
-- Two ways in, one pipeline: Exotel phone calls, and a browser demo behind an access code
+- Two ways in, one pipeline: Exotel phone calls, and a browser demo behind the `demo_lawyer` portal login
 - A review UI in `frontend/` for reading intakes and the browser call panel
 
 ## How a call flows

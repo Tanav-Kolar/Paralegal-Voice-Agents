@@ -12,13 +12,21 @@ from test_telephony import (
 
 from app.api.routes import demo
 from app.core.config import Settings, get_settings
+from app.db.mongodb import get_portal_users_collection
+from app.security.portal import PORTAL_COOKIE, issue_session
 from app.workflows.consent import (
     ENGLISH_CONSENT_PROMPT,
     ENGLISH_CONSENT_REPROMPT,
     ENGLISH_CONSENT_UNCLEAR_CLOSURE,
 )
 
-CODE = "open-sesame"
+EMAIL = "test_lawyer@example.com"
+
+
+class Users:
+    async def find_one(self, query):
+        if query["email"] == EMAIL:
+            return {"email": EMAIL, "role": "demo_lawyer", "active": True}
 
 
 @pytest.fixture(autouse=True)
@@ -36,19 +44,20 @@ def make_demo_client(**overrides):
         exotel_voicebot_password=VOICEBOT_PASSWORD,
         sarvam_api_key="test-sarvam-api-key",
         demo_mode_enabled=True,
-        demo_access_code=CODE,
-        access_cookie_secret="s" * 32,
+        portal_session_secret="s" * 32,
         **overrides,
     )
     client.app.dependency_overrides[get_settings] = lambda: settings
+    client.app.dependency_overrides[get_portal_users_collection] = Users
     return client, events, stt_sessions, tts_providers
 
 
 def login(client) -> None:
-    assert client.post("/api/v1/access/login", json={"code": CODE}).status_code == 200
+    settings = client.app.dependency_overrides[get_settings]()
+    client.cookies.set(PORTAL_COOKIE, issue_session(settings, EMAIL))
 
 
-def test_demo_session_requires_access_code() -> None:
+def test_demo_session_requires_portal_login() -> None:
     client, *_ = make_demo_client()
     with client:
         assert client.post("/api/v1/demo/session").status_code == 401
@@ -154,7 +163,7 @@ def test_demo_can_enable_barge_in_explicitly(monkeypatch) -> None:
     assert any(event["event_type"] == "voicebot_agent_interrupted" for event in events.documents)
 
 
-def test_demo_stream_rejects_missing_access_cookie() -> None:
+def test_demo_stream_rejects_missing_portal_cookie() -> None:
     client, *_ = make_demo_client()
     with client:
         login(client)

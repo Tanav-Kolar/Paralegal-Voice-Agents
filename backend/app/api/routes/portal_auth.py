@@ -5,13 +5,14 @@ from pydantic import BaseModel, Field
 
 from app.core.config import Settings, get_settings
 from app.db.mongodb import get_portal_users_collection
-from app.security.access import check_login_allowed, record_failed_login
 from app.security.portal import (
     PORTAL_COOKIE,
     SESSION_SECONDS,
+    check_login_allowed,
     current_user,
     issue_session,
     portal_ready,
+    record_failed_login,
     verify_password,
 )
 

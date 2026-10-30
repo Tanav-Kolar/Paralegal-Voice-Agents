@@ -10,7 +10,7 @@ The portal is a Vite/React app backed by the FastAPI service. Production images 
 2. From `backend/`, run `python create_portal_user.py lawyer@example.com lawyer`. The script prompts for a display name and password (at least 12 characters). Roles are `admin`, `lawyer`, and `reviewer`. Running it again updates the named account.
 3. Run `uvicorn app.main:app --reload` in `backend/`, then `bun dev` in `frontend/`. Open `http://127.0.0.1:5173` and sign in.
 
-Portal accounts live in MongoDB. Passwords use PBKDF2-SHA256 with a per-user random salt; sessions are signed, expire after eight hours, and are sent in HttpOnly cookies. An admin or lawyer can create a new PDF brief; all roles can review calls; `demo_lawyer` is a shared trial login limited to browser-demo calls and save encrypted notes. The demo access code remains for the separate test-call flow, and cannot open real call details or PDF briefs.
+Portal accounts live in MongoDB. Passwords use PBKDF2-SHA256 with a per-user random salt; sessions are signed, expire after eight hours, and are sent in HttpOnly cookies. An admin or lawyer can create a new PDF brief; all roles can review calls; `demo_lawyer` is a shared trial login limited to browser-demo calls and save encrypted notes. The same login starts browser test calls, and cannot open real call details or PDF briefs.
 
 The queue shows a caller name when available to a signed-in portal user, otherwise a masked number,
 alongside a standard family-law matter category. The selected case

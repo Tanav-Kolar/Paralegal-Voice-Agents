@@ -90,9 +90,9 @@ export class VoiceCall {
         this.closing = true;
         this.release();
         if (event.code === 1013) {
-          this.handlers.onState("error", "A call is already running for this access code.");
+          this.handlers.onState("error", "A call is already running for this account.");
         } else if (event.code === 1008) {
-          this.handlers.onState("error", "Your access expired. Reload the page and sign in again.");
+          this.handlers.onState("error", "Your session expired. Reload the page and sign in again.");
         } else {
           this.handlers.onState("ended");
         }

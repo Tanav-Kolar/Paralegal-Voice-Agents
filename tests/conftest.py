@@ -1,8 +1,8 @@
 import pytest
 
-from app.security import access
+from app.security import portal
 
 
 @pytest.fixture(autouse=True)
 def reset_login_rate_limit() -> None:
-    access._failed_logins.clear()
+    portal._failed_logins.clear()

@@ -58,15 +58,12 @@ class FakeStorageProvider:
 
 
 def make_client(
-    *, app_env: str = "development", local: bool = True, demo: bool = False
+    *, app_env: str = "development", local: bool = True
 ) -> TestClient:
     settings = Settings(
         _env_file=None,
         app_env=app_env,
         local_review_api_enabled=local,
-        demo_mode_enabled=demo,
-        demo_access_code="open-sesame" if demo else "",
-        access_cookie_secret="s" * 32 if demo else "",
         object_storage_provider="gcs",
         gcs_bucket_name="demo-private-bucket",
     )
@@ -151,34 +148,5 @@ def test_local_review_api_is_unavailable_in_production() -> None:
 
     with client:
         response = client.get("/api/v1/review/intake-calls")
-
-    assert response.status_code == 404
-
-
-def test_hosted_review_requires_access_cookie_and_shows_only_demo_calls() -> None:
-    client = make_client(app_env="production", local=False, demo=True)
-
-    with client:
-        assert client.get("/api/v1/review/intake-calls").status_code == 401
-        client.post("/api/v1/access/login", json={"code": "open-sesame"})
-        calls = client.get("/api/v1/review/intake-calls").json()
-
-    assert [call["callerPhoneMasked"] for call in calls] == ["+91******5678"]
-
-
-def test_hosted_review_cannot_play_non_demo_recordings(monkeypatch) -> None:
-    monkeypatch.setattr(
-        review_api, "_create_object_storage_provider", lambda settings: FakeStorageProvider()
-    )
-    client = make_client(app_env="production", local=False, demo=True)
-
-    with client:
-        client.post("/api/v1/access/login", json={"code": "open-sesame"})
-        local_client = make_client()
-        non_demo_id = local_client.get("/api/v1/review/intake-calls").json()[1]["id"]
-        response = client.get(
-            f"/api/v1/review/intake-calls/{non_demo_id}/recordings/0/playback",
-            follow_redirects=False,
-        )
 
     assert response.status_code == 404

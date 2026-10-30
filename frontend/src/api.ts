@@ -30,29 +30,11 @@ export function recordingPlaybackUrl(callId: string, artifactIndex: number): str
   return `${apiBaseUrl}/api/v1/review/intake-calls/${callId}/recordings/${artifactIndex}/playback`;
 }
 
-export type AccessState = { enabled: boolean; authenticated: boolean };
-
-export async function loadAccess(): Promise<AccessState> {
-  const response = await fetch(`${apiBaseUrl}/api/v1/access/me`);
-  if (!response.ok) throw new Error("The service is unavailable.");
-  return response.json() as Promise<AccessState>;
-}
-
-export async function login(code: string): Promise<void> {
-  const response = await fetch(`${apiBaseUrl}/api/v1/access/login`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code }),
-  });
-  if (response.status === 429) throw new Error("Too many attempts. Try again in a few minutes.");
-  if (!response.ok) throw new Error("That access code is not valid.");
-}
-
 export type DemoSession = { intakeCallId: string; streamPath: string; sampleRate: number };
 
 export async function startDemoSession(): Promise<DemoSession> {
   const response = await fetch(`${apiBaseUrl}/api/v1/demo/session`, { method: "POST" });
-  if (response.status === 401) throw new Error("Your access expired. Reload the page and sign in again.");
+  if (response.status === 401) throw new Error("Your session expired. Reload the page and sign in again.");
   if (!response.ok) throw new Error("The demo could not start a call. Try again.");
   return response.json() as Promise<DemoSession>;
 }

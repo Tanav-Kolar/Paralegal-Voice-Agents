@@ -20,9 +20,10 @@ from app.db.mongodb import (
     get_call_events_collection,
     get_intake_audit_events_collection,
     get_intake_calls_collection,
+    get_portal_users_collection,
 )
-from app.security.access import ACCESS_COOKIE, demo_access_ready, has_access, require_access
 from app.security.field_encryption import FieldEncryptor, get_field_encryptor
+from app.security.portal import current_user, require_role
 from app.voice.transport import BrowserTransport
 
 router = APIRouter()
@@ -32,14 +33,17 @@ _active_sessions: set[str] = set()
 DEMO_SAMPLE_RATE = 16000
 
 
-@router.post("/session", dependencies=[Depends(require_access)])
+@router.post("/session")
 async def create_demo_session(
+    _user: dict = Depends(require_role("demo_lawyer")),
     settings: Settings = Depends(get_settings),
     encryptor: FieldEncryptor = Depends(get_field_encryptor),
     intake_collection=Depends(get_intake_calls_collection),
     audit_collection=Depends(get_intake_audit_events_collection),
 ) -> dict[str, str | int]:
     """Create a demo intake call and return the stream path for the browser to open."""
+    if not settings.demo_mode_enabled:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     session_token = token_hex(32)
     await _create_voicebot_intake_call(
         collection=intake_collection,
@@ -70,8 +74,13 @@ async def demo_stream(
     intake_collection=Depends(get_intake_calls_collection),
     audit_collection=Depends(get_intake_audit_events_collection),
     encryptor: FieldEncryptor = Depends(get_field_encryptor),
+    users=Depends(get_portal_users_collection),
 ) -> None:
-    if not demo_access_ready(settings) or not has_access(websocket.cookies, settings):
+    try:
+        user = await current_user(websocket, settings, users)
+    except HTTPException:
+        user = None
+    if not settings.demo_mode_enabled or not user or user["role"] != "demo_lawyer":
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
     session_token = websocket.query_params.get("session_token", "")
@@ -85,7 +94,7 @@ async def demo_stream(
     if not demo_call:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    viewer = websocket.cookies.get(ACCESS_COOKIE, "")
+    viewer = user["email"]
     if viewer in _active_sessions or len(_active_sessions) >= settings.demo_max_concurrent_sessions:
         await websocket.close(code=status.WS_1013_TRY_AGAIN_LATER)
         return

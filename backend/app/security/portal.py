@@ -5,15 +5,37 @@ import hashlib
 import hmac
 import json
 import os
-from time import time
+from time import monotonic, time
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, status
+from starlette.requests import HTTPConnection
 
 from app.core.config import Settings, get_settings
 from app.db.mongodb import get_portal_users_collection
 
 PORTAL_COOKIE = "lawyer_portal_session"
 SESSION_SECONDS = 8 * 3600
+LOGIN_WINDOW_SECONDS = 600
+LOGIN_MAX_ATTEMPTS = 10
+
+# In-memory per-instance limiter; use a shared store if Cloud Run scales past one instance.
+_failed_logins: dict[str, list[float]] = {}
+
+
+def check_login_allowed(client_id: str) -> None:
+    now = monotonic()
+    recent = [t for t in _failed_logins.get(client_id, []) if now - t < LOGIN_WINDOW_SECONDS]
+    _failed_logins[client_id] = recent
+    if len(recent) >= LOGIN_MAX_ATTEMPTS:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS, "Too many attempts. Try again later."
+        )
+
+
+def record_failed_login(client_id: str) -> None:
+    _failed_logins.setdefault(client_id, []).append(monotonic())
+
+
 ROLES = {"admin", "lawyer", "reviewer", "demo_lawyer"}
 
 
@@ -72,7 +94,7 @@ def session_email(settings: Settings, token: str | None) -> str | None:
 
 
 async def current_user(
-    request: Request,
+    request: HTTPConnection,
     settings: Settings = Depends(get_settings),
     users=Depends(get_portal_users_collection),
 ) -> dict:

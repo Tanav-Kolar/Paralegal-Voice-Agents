@@ -26,7 +26,6 @@ from app.schemas.intake_call import (
     ProtectedObjectReference,
     ReviewStatus,
 )
-from app.security.access import demo_access_ready, has_access
 from app.security.field_encryption import FieldEncryptor, get_optional_field_encryptor
 from app.security.portal import PORTAL_COOKIE, current_user, require_role, session_email
 from app.services.audit import record_audit_event
@@ -65,7 +64,7 @@ async def review_scope(
 ) -> dict:
     """Return the Mongo filter for calls this caller may see, or hide the route.
 
-    Portal users see all calls. The hosted access-code prototype sees demo calls only.
+    Portal users see all calls; the trial lawyer sees demo calls only.
     """
     email = session_email(settings, request.cookies.get(PORTAL_COOKIE))
     if email:
@@ -75,12 +74,6 @@ async def review_scope(
             return _user_scope(user)
     if settings.local_review_api_enabled and settings.app_env != "production":
         return {}
-    if demo_access_ready(settings):
-        if not has_access(request.cookies, settings):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="Access code required"
-            )
-        return {"telephony.provider": "demo"}
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
 
