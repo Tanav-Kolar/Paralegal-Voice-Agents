@@ -29,6 +29,7 @@ router = APIRouter()
 
 # ponytail: per-instance tracking; use a shared store if Cloud Run scales past one instance.
 _active_sessions: set[str] = set()
+DEMO_SAMPLE_RATE = 16000
 
 
 @router.post("/session", dependencies=[Depends(require_access)])
@@ -37,7 +38,7 @@ async def create_demo_session(
     encryptor: FieldEncryptor = Depends(get_field_encryptor),
     intake_collection=Depends(get_intake_calls_collection),
     audit_collection=Depends(get_intake_audit_events_collection),
-) -> dict[str, str]:
+) -> dict[str, str | int]:
     """Create a demo intake call and return the stream path for the browser to open."""
     session_token = token_hex(32)
     await _create_voicebot_intake_call(
@@ -57,6 +58,7 @@ async def create_demo_session(
     return {
         "intakeCallId": str(created["id"]),
         "streamPath": f"{settings.api_v1_prefix}/demo/stream?session_token={session_token}",
+        "sampleRate": DEMO_SAMPLE_RATE,
     }
 
 
@@ -93,7 +95,12 @@ async def demo_stream(
             await run_voicebot_stream(
                 BrowserTransport(websocket),
                 session_token=session_token,
-                settings=settings,
+                settings=settings.model_copy(
+                    update={
+                        "sarvam_stt_sample_rate": DEMO_SAMPLE_RATE,
+                        "sarvam_tts_sample_rate": DEMO_SAMPLE_RATE,
+                    }
+                ),
                 collection=collection,
                 intake_collection=intake_collection,
                 audit_collection=audit_collection,

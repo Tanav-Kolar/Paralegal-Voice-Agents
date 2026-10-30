@@ -1,9 +1,8 @@
-// Browser side of a demo call. Binary websocket frames are raw 16-bit mono PCM at 8 kHz in both
+// Browser side of a demo call. Binary websocket frames are raw 16-bit mono PCM in both
 // directions; the text frame "stop" hangs up. The server may send the text frame "clear" to
 // drop agent audio that is queued but not yet played (barge-in).
-const SAMPLE_RATE = 8000;
-const CHUNK_SAMPLES = 800; // 100 ms
 const AGENT_TAIL_SECONDS = 0.4;
+const PLAYBACK_BUFFER_SECONDS = 0.2;
 
 export type CallState = "idle" | "connecting" | "live" | "ended" | "error";
 
@@ -33,7 +32,7 @@ export class VoiceCall {
   private agentTextSeconds = 0;
   private agentWordsShown = 0;
 
-  constructor(private readonly handlers: Handlers) {}
+  constructor(private readonly handlers: Handlers, private readonly sampleRate: number) {}
 
   async start(streamPath: string): Promise<void> {
     this.handlers.onState("connecting");
@@ -135,7 +134,8 @@ export class VoiceCall {
   }
 
   private captureMicrophone(context: AudioContext, stream: MediaStream): void {
-    const ratio = context.sampleRate / SAMPLE_RATE;
+    const ratio = context.sampleRate / this.sampleRate;
+    const chunkSamples = this.sampleRate / 10; // 100 ms
     this.nextOutput = ratio;
     const node = new AudioWorkletNode(context, "mic-capture");
     node.port.onmessage = (event: MessageEvent<Float32Array>) => {
@@ -154,7 +154,7 @@ export class VoiceCall {
         }
       }
       this.handlers.onLevel(peak);
-      while (this.pending.length >= CHUNK_SAMPLES) this.sendChunk(this.pending.splice(0, CHUNK_SAMPLES));
+      while (this.pending.length >= chunkSamples) this.sendChunk(this.pending.splice(0, chunkSamples));
     };
     const silent = context.createGain();
     silent.gain.value = 0;
@@ -181,7 +181,7 @@ export class VoiceCall {
     this.leftoverByte = usable < bytes.length ? bytes[usable] : null;
     if (usable === 0) return;
     const pcm = new Int16Array(bytes.buffer.slice(0, usable));
-    const buffer = context.createBuffer(1, pcm.length, SAMPLE_RATE);
+    const buffer = context.createBuffer(1, pcm.length, this.sampleRate);
     this.advanceAgentText(buffer.duration);
     const channel = buffer.getChannelData(0);
     let peak = 0;
@@ -193,7 +193,9 @@ export class VoiceCall {
     const source = context.createBufferSource();
     source.buffer = buffer;
     source.connect(context.destination);
-    this.playHead = Math.max(this.playHead, context.currentTime + 0.05);
+    // Give incoming websocket frames enough lead time to absorb normal network
+    // and main-thread jitter without inserting silence between audio buffers.
+    this.playHead = Math.max(this.playHead, context.currentTime + PLAYBACK_BUFFER_SECONDS);
     source.onended = () => this.playing.delete(source);
     this.playing.add(source);
     source.start(this.playHead);
@@ -209,6 +211,8 @@ export class VoiceCall {
   private clearAgentAudio(): void {
     this.playing.forEach((source) => source.stop());
     this.playing.clear();
+    if (this.speakingTimer) window.clearTimeout(this.speakingTimer);
+    this.speakingTimer = null;
     this.leftoverByte = null;
     this.playHead = 0;
     this.agentText = "";

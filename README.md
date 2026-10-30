@@ -25,15 +25,15 @@ Browser WebSocket ─► BrowserTransport ┘       │
 - `app/voice/session.py`: `Session` owns the English consent and conversation workflows, recording
   and persistence. Turns run on a worker so the agent can be interrupted mid-sentence.
 - `app/api/routes/telephony.py`: Exotel webhooks, the voicebot URL resolver and stream authentication.
-- `app/api/routes/demo.py`: browser demo sessions (raw PCM frames, 8 kHz mono; the text frame `stop`
+- `app/api/routes/demo.py`: browser demo sessions (raw PCM frames, 16 kHz mono; the text frame `stop`
   hangs up).
 
 Browser demo barge-in is off by default (`DEMO_BARGE_IN_ENABLED`). During agent speech and a
 short playback tail, the demo discards microphone frames before speech recognition and recording
 to prevent speaker echo from doubling the agent in saved calls. Callers should wait for the agent
 to finish before replying. Telephony barge-in is controlled separately by
-`VOICE_BARGE_IN_ENABLED`. STT and TTS sample rates must match, since caller and agent audio share
-one stream.
+`VOICE_BARGE_IN_ENABLED`. The Exotel stream uses matching 8 kHz STT and TTS settings; the browser
+demo uses 16 kHz in both directions for clearer speech.
 
 ## Local setup
 

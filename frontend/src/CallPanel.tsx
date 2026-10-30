@@ -44,7 +44,7 @@ export function CallPanel({ onFinished }: { onFinished: () => void }) {
           }
           return [...items, { id: Date.now() + items.length, speaker, text }];
         }),
-      });
+      }, session.sampleRate);
       await call.current.start(session.streamPath);
     } catch (reason) { setState("error"); setMessage(reason instanceof Error ? reason.message : "The call could not start."); }
   }

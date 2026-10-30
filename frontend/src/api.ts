@@ -48,7 +48,7 @@ export async function login(code: string): Promise<void> {
   if (!response.ok) throw new Error("That access code is not valid.");
 }
 
-export type DemoSession = { intakeCallId: string; streamPath: string };
+export type DemoSession = { intakeCallId: string; streamPath: string; sampleRate: number };
 
 export async function startDemoSession(): Promise<DemoSession> {
   const response = await fetch(`${apiBaseUrl}/api/v1/demo/session`, { method: "POST" });
