@@ -66,7 +66,7 @@ ENGLISH_CONSENT_REPROMPT = (
     "Sorry, I didn't quite catch that. Are you comfortable with me recording this "
     "conversation and continuing? A simple yes or no is fine."
 )
-ENGLISH_CONSENT_GRANTED_RESPONSE = "Thank you. Take your time, there's no rush."
+ENGLISH_CONSENT_GRANTED_RESPONSE = "Thank you."
 ENGLISH_CONSENT_DECLINED_RESPONSE = (
     "That's completely fine. I won't record this call or collect any details. "
     "Thank you for calling, and take care."

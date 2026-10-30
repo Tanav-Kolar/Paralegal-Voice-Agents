@@ -1,5 +1,6 @@
 """Post-consent conversation driven by a playbook and a replaceable language model."""
 
+import re
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -41,7 +42,10 @@ Avoid forms language, repeated greetings, stock sympathy, and announcing each st
 Usually reply in one or two sentences. Ask one clear question at a time, then leave room for an
 answer. Briefly acknowledge what the caller said when it helps, and move to the most useful next
 question. Do not repeat their account back after every answer or ask for a detail already given.
-Only clarify something when it matters and is genuinely unclear.
+Only clarify a detail the caller has already stated, when it matters and is genuinely unclear.
+Never suggest a name, date, location, relationship, or event for the caller to confirm unless
+the caller has already supplied that exact detail during this call. If a detail is missing,
+ask an open question without proposing an answer. There is no example case or expected answer.
 Allow the caller to skip questions or stop at any time. Never invent or assume facts.
 
 The intake playbook is to learn, when relevant and the caller is willing: the caller's name and
@@ -64,6 +68,26 @@ Return JSON with exactly two fields: reply, the words to speak, and finished, a 
 the conversation has reached its closing response. Do not include notes, markdown, or reasoning.
 """
 
+_CAPITALIZED_WORD = re.compile(r"\b[A-Z][a-z]+\b")
+_NUMBER = re.compile(r"\b\d+(?:[./-]\d+)*\b")
+_ORDINARY_CAPITALIZED = {
+    "And", "Are", "Before", "Can", "Could", "Did", "Do", "Does", "For", "Goodbye",
+    "Have", "How", "If", "Is", "It", "Please", "So", "Tell", "Thank", "That",
+    "The", "There", "This", "To", "Was", "We", "Were", "What", "When", "Where",
+    "Which", "Who", "Would", "You", "Your",
+}
+
+
+def _introduces_unstated_detail(reply: str, caller_speech: list[str]) -> bool:
+    """Fail closed on newly introduced names, places, dates, and numeric details."""
+    stated = " ".join(caller_speech).casefold()
+    stated_words = set(re.findall(r"\b\w+\b", stated))
+    for match in _CAPITALIZED_WORD.finditer(reply):
+        word = match.group()
+        if word not in _ORDINARY_CAPITALIZED and word.casefold() not in stated_words:
+            return True
+    return any(match.group() not in stated for match in _NUMBER.finditer(reply))
+
 
 class ConversationWorkflow:
     """Maintain conversation history without letting the model manage consent or persistence."""
@@ -77,6 +101,7 @@ class ConversationWorkflow:
         self._messages = [
             {"role": "system", "content": _PLAYBOOK.format(agent_language=spoken_language)}
         ]
+        self._caller_speech: list[str] = []
         self.finished = False
 
     async def begin(self) -> ConversationReply:
@@ -90,6 +115,7 @@ class ConversationWorkflow:
     async def handle_response(self, text: str) -> ConversationReply:
         if self.finished:
             raise RuntimeError("Conversation is complete")
+        self._caller_speech.append(text)
         return await self._generate({"role": "user", "content": text})
 
     async def _generate(self, message: dict[str, str]) -> ConversationReply:
@@ -97,6 +123,22 @@ class ConversationWorkflow:
             raise ConversationUnavailable("Conversation exceeded the context limit")
         self._messages.append(message)
         result = await self._provider.reply(list(self._messages))
+        if _introduces_unstated_detail(result.reply, self._caller_speech):
+            fallback = (
+                "What brought you to the firm?"
+                if not self._caller_speech
+                else "What else would you like the lawyer to know?"
+            )
+            if self.language == LanguageChoice.HINDI:
+                fallback = (
+                    "आप किस बारे में बात करना चाहेंगे?"
+                    if not self._caller_speech
+                    else "आप वकील को और क्या बताना चाहेंगे?"
+                )
+            result = ConversationReply(
+                reply=fallback,
+                finished=False,
+            )
         self._messages.append({"role": "assistant", "content": result.reply})
         self.finished = result.finished
         return result
