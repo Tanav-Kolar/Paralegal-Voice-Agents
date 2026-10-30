@@ -757,11 +757,36 @@ def test_outbound_audio_frames_are_sample_aligned(monkeypatch) -> None:
     with client:
         with _stream(client, "aligned", "s1") as ws:
             ws.send_json({"event": "start", "start": {"stream_sid": "s1"}})
-            frames = [b64decode(ws.receive_json()["media"]["payload"]) for _ in range(2)]
+            frame = b64decode(ws.receive_json()["media"]["payload"])
             ws.send_json({"event": "stop"})
             while ws.receive()["type"] != "websocket.close":
                 pass
-    assert frames == [b"ab", b"cdef"]
+    assert frame == b"abcdef"
+
+
+def test_outbound_phone_audio_uses_complete_twenty_ms_frames(monkeypatch) -> None:
+    from app.api.routes import telephony
+    from app.providers.contracts import SpeechAudio
+
+    pcm = bytes(range(256)) * 3 + b"odd"
+
+    class SplitTts:
+        async def stream(self, text, *, language_code=None, speaker=None):
+            yield SpeechAudio(content=pcm[:217], content_type="audio/L16")
+            yield SpeechAudio(content=pcm[217:501], content_type="audio/L16")
+            yield SpeechAudio(content=pcm[501:], content_type="audio/L16")
+
+    client, *_ = make_client()
+    monkeypatch.setattr(telephony, "_create_tts_provider", lambda settings: SplitTts())
+    with client:
+        with _stream(client, "complete-frames", "s1") as ws:
+            ws.send_json({"event": "start", "start": {"stream_sid": "s1"}})
+            frames = [b64decode(ws.receive_json()["media"]["payload"]) for _ in range(3)]
+            ws.send_json({"event": "stop"})
+            while ws.receive()["type"] != "websocket.close":
+                pass
+    assert [len(frame) for frame in frames] == [320, 320, 130]
+    assert b"".join(frames) == pcm[:-1]
 
 
 def test_unexpected_turn_failure_ends_the_call_instead_of_silently_stalling(monkeypatch) -> None:
@@ -853,7 +878,7 @@ def test_agent_echo_does_not_trigger_barge_in(monkeypatch) -> None:
         ws.send_json({"event": "start", "start": {"stream_sid": "s1"}})
         assert ws.receive_json()["event"] == "media"
         stt_sessions[0].transcript_on_next_audio = (
-            "transcript.partial", "I can take some initial details", "en-IN"
+            "transcript.partial", "note down a few details so one of our lawyers", "en-IN"
         )
         ws.send_json({"event": "media", "media": {"payload": "YXVkaW8="}})
         ws.send_json({"event": "stop"})

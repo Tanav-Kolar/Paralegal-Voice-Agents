@@ -51,6 +51,16 @@ logger = logging.getLogger(__name__)
 CONVERSATION_UNAVAILABLE = (
     "I am unable to continue the intake right now. Thank you for calling. Goodbye."
 )
+SILENCE_CHECK_IN = "Sorry, I didn't hear a reply. Would you like to continue with the intake?"
+SILENCE_CLOSURE = (
+    "I still haven't heard from you, so I'll end the call here. "
+    "What you've shared so far will be passed to our lawyers. Thank you for calling, and take care."
+)
+TRIAL_ENDED = (
+    "The time limit for this trial has been exhausted. "
+    "You can review your call and case details in the lawyer portal."
+)
+TRIAL_NOTICE_LEAD_SECONDS = 20  # the demo's hard cutoff follows; leave time to say the notice
 
 
 async def record_voicebot_session_event(
@@ -144,11 +154,15 @@ class Session:
         # media loop keep moving while the agent speaks; that is what makes barge-in possible.
         self._turns: asyncio.Queue[tuple[str, str | None] | None] = asyncio.Queue()
         self._worker: asyncio.Task | None = None
+        self._trial_timer: asyncio.Task | None = None
         self._speech_task: asyncio.Task | None = None
         self._current_speech_text = ""
         self._agent_audio_until = 0.0
         self._turn_interrupted = False
         self._hung_up = False
+        self._time_up = False
+        self._silence_task: asyncio.Task | None = None
+        self._silence_strikes = 0
         self.selected_dialogue: ConsentDialogue = get_consent_dialogue(LanguageChoice.ENGLISH)
         self.recording_provider: ObjectStorageProvider | None = None
         self.recorder: ConsentGatedCallRecorder | None = None
@@ -170,9 +184,13 @@ class Session:
         *,
         language_code: str | None = None,
         speaker: str | None = None,
+        final: bool = False,
     ) -> None:
-        if self._turn_interrupted or self._hung_up:
+        if self._hung_up or (self._time_up and not final):
             return
+        if self._turn_interrupted and not final:
+            return
+        self._cancel_silence()
         async with self.speech_lock:
             await self.transport.send_transcript("agent", text)
             self._current_speech_text = text
@@ -188,39 +206,68 @@ class Session:
             finally:
                 self._speech_task = None
                 self._current_speech_text = ""
-            if self._turn_interrupted or self._hung_up:
+            if (self._turn_interrupted and not final) or self._hung_up:
                 return
             await self.transport.finish_agent_transcript()
             await self._save_agent_segment(text, language_code)
+            self._arm_silence()
 
     async def _stream_speech(
         self, text: str, language_code: str | None, speaker: str | None
     ) -> None:
         tts_provider = self._create_tts(self.settings)
-        leftover = b""
-        frame_bytes = self.settings.sarvam_tts_sample_rate * 2 // 50  # 20 ms
+        pending = b""
+        # Phone media uses 20 ms frames. Larger browser frames reduce websocket and
+        # AudioBuffer scheduling overhead while leaving room for a playback buffer.
+        frame_ms = 100 if self.transport.provider == "demo" else 20
+        frame_bytes = self.settings.sarvam_tts_sample_rate * 2 * frame_ms // 1000
         next_frame_at = monotonic()
-        async for audio in tts_provider.stream(text, language_code=language_code, speaker=speaker):
-            # Keep every frame sample-aligned; a split 16-bit sample plays as static.
-            chunk = leftover + audio.content
-            usable = len(chunk) - len(chunk) % 2
-            chunk, leftover = chunk[:usable], chunk[usable:]
-            if not chunk:
-                continue
-            for offset in range(0, len(chunk), frame_bytes):
-                delay = next_frame_at - monotonic()
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                frame = chunk[offset : offset + frame_bytes]
-                await self.transport.send_audio(frame)
-                if self.recorder:
-                    self.recorder.append_agent_audio(frame)
-                self._agent_audio_until = monotonic() + len(frame) / (
-                    self.settings.sarvam_tts_sample_rate * 2
-                ) + 0.25
-                next_frame_at = max(next_frame_at, monotonic()) + len(frame) / (
-                    self.settings.sarvam_tts_sample_rate * 2
+
+        async def send_frame(frame: bytes) -> None:
+            nonlocal next_frame_at
+            delay = next_frame_at - monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            await self.transport.send_audio(frame)
+            if self.recorder:
+                self.recorder.append_agent_audio(frame)
+            duration = len(frame) / (self.settings.sarvam_tts_sample_rate * 2)
+            # The browser queues audio ahead of its output clock. Keep microphone
+            # gating active until that queued speech and its echo tail have passed.
+            tail = 0.7 if self.transport.provider == "demo" else 0.25
+            self._agent_audio_until = monotonic() + duration + tail
+            next_frame_at = max(next_frame_at, monotonic()) + duration
+
+        stream = tts_provider.stream(text, language_code=language_code, speaker=speaker)
+        next_audio = asyncio.create_task(anext(stream, None))
+        try:
+            while True:
+                # Sarvam can pause after a short chunk. Emit it promptly instead
+                # of waiting indefinitely for enough bytes to fill a frame.
+                done, _ = await asyncio.wait(
+                    {next_audio}, timeout=0.04 if len(pending) >= 2 else None
                 )
+                if not done:
+                    usable = len(pending) & ~1
+                    await send_frame(pending[:usable])
+                    pending = pending[usable:]
+                    continue
+                audio = next_audio.result()
+                if audio is None:
+                    break
+                pending += audio.content
+                while len(pending) >= frame_bytes:
+                    frame, pending = pending[:frame_bytes], pending[frame_bytes:]
+                    await send_frame(frame)
+                next_audio = asyncio.create_task(anext(stream, None))
+        finally:
+            if not next_audio.done():
+                next_audio.cancel()
+                with suppress(asyncio.CancelledError):
+                    await next_audio
+        # A final short frame is valid, but never send half of a 16-bit sample.
+        if len(pending) >= 2:
+            await send_frame(pending[: len(pending) & ~1])
 
     async def _save_agent_segment(self, text: str, language_code: str | None) -> None:
         if self.consent_workflow.state != ConsentState.GRANTED or not self.conversation:
@@ -270,6 +317,8 @@ class Session:
         spoken = re.sub(r"\W+", " ", self._current_speech_text.casefold()).strip()
         if self._speech_task and len(heard) >= 12 and heard in spoken:
             return
+        self._cancel_silence()
+        self._silence_strikes = 0
         if event_type in {"transcript.partial", "transcript.final"} and barge_in_enabled:
             await self._interrupt_speech()
         if event_type == "transcript.final":
@@ -288,6 +337,62 @@ class Session:
             "voicebot_agent_interrupted",
             at_ms=max(0, int((monotonic() - self.started_at) * 1000)),
         )
+
+    def _cancel_silence(self) -> None:
+        task = self._silence_task
+        if task and task is not asyncio.current_task():
+            task.cancel()
+        self._silence_task = None
+
+    def _arm_silence(self) -> None:
+        awaiting = self.consent_workflow.state == ConsentState.AWAITING_CONSENT or (
+            self.consent_workflow.state == ConsentState.GRANTED
+            and self.conversation is not None
+            and not self.conversation.finished
+        )
+        if awaiting and not self._time_up and not self._hung_up:
+            self._silence_task = asyncio.create_task(self._on_silence())
+
+    async def _on_silence(self) -> None:
+        """No reply after the agent spoke: re-ask once, then end the call."""
+        await asyncio.sleep(self.settings.caller_silence_seconds)
+        self._silence_strikes += 1
+        dialogue = self.selected_dialogue
+        voice = {
+            "language_code": dialogue.language_code,
+            "speaker": self.settings.sarvam_tts_speaker,
+        }
+        consenting = self.consent_workflow.state == ConsentState.AWAITING_CONSENT
+        await self._session_event("voicebot_caller_silence", strikes=self._silence_strikes)
+        if self._silence_strikes == 1:
+            await self.speak(dialogue.reprompt if consenting else SILENCE_CHECK_IN, **voice)
+            return
+        if consenting:
+            self.consent_workflow.close()
+            closing = dialogue.unclear_closure
+        else:
+            self.conversation.finished = True
+            closing = SILENCE_CLOSURE
+        await self._update_call(status=CallStatus.ABANDONED.value)
+        await self.speak(closing, **voice)
+        # Let the far end finish playing the farewell before hanging up.
+        await asyncio.sleep(min(5.0, max(0.0, self._agent_audio_until - monotonic())))
+        with suppress(RuntimeError, WebSocketDisconnect):
+            await self.transport.close()
+
+    async def _announce_trial_end(self) -> None:
+        """Demo only: shortly before the hard cutoff, cut in and say the trial is over."""
+        await asyncio.sleep(
+            max(0, self.settings.demo_session_max_seconds - TRIAL_NOTICE_LEAD_SECONDS)
+        )
+        self._time_up = True
+        task = self._speech_task
+        if task and not task.done():
+            task.cancel()
+            with suppress(RuntimeError):
+                await self.transport.clear()
+        with suppress(RuntimeError, WebSocketDisconnect):
+            await self.speak(TRIAL_ENDED, final=True)
 
     async def _turn_worker(self) -> None:
         while True:
@@ -604,6 +709,8 @@ class Session:
                         await self.transport.close(status.WS_1011_INTERNAL_ERROR)
                         return
                     self._worker = asyncio.create_task(self._turn_worker())
+                    if self.transport.provider == "demo":
+                        self._trial_timer = asyncio.create_task(self._announce_trial_end())
                     self._turns.put_nowait(None)
                 elif isinstance(event, Audio):
                     if self._demo_agent_audio_active():
@@ -629,9 +736,11 @@ class Session:
             logger.info("exotel_voicebot_stream_disconnected stream_sid=%s", self.stream_sid)
             await self._session_event("voicebot_stream_disconnected")
         finally:
-            if self._worker:
-                self._worker.cancel()
-                await asyncio.gather(self._worker, return_exceptions=True)
+            self._cancel_silence()
+            tasks = [t for t in (self._trial_timer, self._worker, self._silence_task) if t]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             if self.stt_session:
                 await self.stt_session.stop()
             await self._finalize_recording()

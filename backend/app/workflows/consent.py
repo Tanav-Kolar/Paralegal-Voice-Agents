@@ -56,19 +56,24 @@ _DECLINED_TERMS = {
 }
 
 ENGLISH_CONSENT_PROMPT = (
-    "I'm an AI intake assistant for the law firm. I can take some initial details for a lawyer "
-    "to review. I can't give legal advice, and this call doesn't create a lawyer-client "
-    "relationship. With your consent, this conversation may be recorded and reviewed by the "
-    "firm. Is it okay to continue? Please say yes or no."
+    "Hello, and thank you for calling Victus Family Law Firm. I'm an AI assistant, and I'm here "
+    "to listen and note down a few details so one of our lawyers can follow up with you. "
+    "I cannnot give legal advice and speaking with me doesn't create a lawyer-client relationship."
+    "With your permission, I'd also like to record this conversation so our team"
+    "can review it. Are you comfortable continuing?"
 )
-ENGLISH_CONSENT_REPROMPT = "Is it okay to continue? Please say yes or no."
-ENGLISH_CONSENT_GRANTED_RESPONSE = "Thank you."
+ENGLISH_CONSENT_REPROMPT = (
+    "Sorry, I didn't quite catch that. Are you comfortable with me recording this "
+    "conversation and continuing? A simple yes or no is fine."
+)
+ENGLISH_CONSENT_GRANTED_RESPONSE = "Thank you. Take your time, there's no rush."
 ENGLISH_CONSENT_DECLINED_RESPONSE = (
-    "I understand. I will not collect case information. Thank you for calling."
+    "That's completely fine. I won't record this call or collect any details. "
+    "Thank you for calling, and take care."
 )
 ENGLISH_CONSENT_UNCLEAR_CLOSURE = (
-    "I was unable to confirm your consent, so I will not collect case information. "
-    "Thank you for calling."
+    "I wasn't able to confirm, so I won't record this call or collect any details. "
+    "You're welcome to call back anytime. Take care."
 )
 
 

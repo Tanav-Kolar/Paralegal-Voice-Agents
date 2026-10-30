@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     portal_session_secret: str = ""
     demo_session_max_seconds: int = Field(default=300, ge=30, le=1800)
     demo_max_concurrent_sessions: int = Field(default=3, ge=1, le=20)
+    caller_silence_seconds: int = Field(default=10, ge=1, le=120)
     field_encryption_key: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
